@@ -28,6 +28,9 @@ func NewRouter(s Server) *gin.Engine {
 	if len(s.Middlewares) > 0 {
 		r.Use(s.Middlewares...)
 	}
+	r.Use(gin.LoggerWithConfig(gin.LoggerConfig{
+		SkipPaths: []string{"/healthz", "/readyz"},
+	}))
 	r.Use(gin.Recovery())
 	RegisterRoutes(r, s)
 	return r
