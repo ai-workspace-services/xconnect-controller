@@ -33,8 +33,17 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	stopTracing, ddEnabled := observability.ConfigureDDTrace("web-saas-xconnect-controller")
-	defer stopTracing()
+	stopTracing, tracingProvider, traceErr := observability.ConfigureTracing(ctx, "web-saas-xconnect-controller")
+	if traceErr != nil {
+		logger.Warn("tracing disabled", "err", traceErr)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := stopTracing(shutdownCtx); err != nil {
+			logger.Warn("tracing shutdown failed", "err", err)
+		}
+	}()
 
 	db, err := openDatabase()
 	if err != nil {
@@ -70,8 +79,8 @@ func main() {
 	verifier := auth.NewVerifier(auth.VerifierConfigFromEnv(userReader))
 
 	var middlewares []gin.HandlerFunc
-	if ddEnabled {
-		middlewares = append(middlewares, observability.GinMiddleware("web-saas-xconnect-controller"))
+	if tracingProvider != observability.ProviderNone {
+		middlewares = append(middlewares, observability.GinMiddleware(tracingProvider, "web-saas-xconnect-controller"))
 	}
 
 	router := httpapi.NewRouter(httpapi.Server{
@@ -123,7 +132,11 @@ func openDatabase() (*gorm.DB, error) {
 		if strings.HasPrefix(dsn, "sqlite://") || strings.HasPrefix(dsn, "file:") || strings.HasSuffix(dsn, ".db") {
 			return gorm.Open(sqlite.Open(strings.TrimPrefix(dsn, "sqlite://")), &gorm.Config{})
 		}
-		return gorm.Open(postgres.Open(dsn), &gorm.Config{})
+		sqlDB, err := observability.OpenPostgres(dsn)
+		if err != nil {
+			return nil, err
+		}
+		return gorm.Open(postgres.New(postgres.Config{Conn: sqlDB}), &gorm.Config{})
 	}
 	host := strings.TrimSpace(os.Getenv("DB_HOST"))
 	if host == "" {
@@ -146,7 +159,11 @@ func openDatabase() (*gorm.DB, error) {
 	q := pgURL.Query()
 	q.Set("sslmode", sslMode)
 	pgURL.RawQuery = q.Encode()
-	return gorm.Open(postgres.Open(pgURL.String()), &gorm.Config{})
+	sqlDB, err := observability.OpenPostgres(pgURL.String())
+	if err != nil {
+		return nil, err
+	}
+	return gorm.Open(postgres.New(postgres.Config{Conn: sqlDB}), &gorm.Config{})
 }
 
 func firstNonEmpty(values ...string) string {
