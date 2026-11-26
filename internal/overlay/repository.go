@@ -1,0 +1,712 @@
+package overlay
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"net/netip"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+// The repository deliberately stores only token digests. Raw join tokens,
+// device credentials, enrollment bearers, and client private keys never enter
+// these models.
+type NetworkRecord struct {
+	ID                      string    `gorm:"column:id;type:text;primaryKey"`
+	DisplayName             string    `gorm:"column:display_name;type:text;not null"`
+	CIDR                    string    `gorm:"column:cidr;type:text;not null"`
+	GatewayID               string    `gorm:"column:gateway_id;type:text;not null"`
+	GatewayWireGuardKey     string    `gorm:"column:gateway_wireguard_key;type:text;not null"`
+	GatewayWireGuardAddress string    `gorm:"column:gateway_wireguard_address;type:text;not null;default:''"`
+	GatewayEndpointHost     string    `gorm:"column:gateway_endpoint_host;type:text;not null"`
+	GatewayEndpointPort     int       `gorm:"column:gateway_endpoint_port;not null"`
+	TransportServerName     string    `gorm:"column:transport_server_name;type:text;not null"`
+	TransportPort           int       `gorm:"column:transport_port;not null"`
+	TransportAuthID         string    `gorm:"column:transport_auth_id;type:text;not null"`
+	TransportKind           string    `gorm:"column:transport_kind;type:text;not null;default:'vless-xhttp'"`
+	TransportPath           string    `gorm:"column:transport_path;type:text;not null;default:'/xconnect'"`
+	TransportMode           string    `gorm:"column:transport_mode;type:text;not null;default:'auto'"`
+	TransportHost           string    `gorm:"column:transport_host;type:text;not null;default:''"`
+	GatewayFrontend         string    `gorm:"column:gateway_frontend;type:text;not null;default:''"`
+	GatewayListenSocket     string    `gorm:"column:gateway_listen_socket;type:text;not null;default:''"`
+	ConnectionMode          string    `gorm:"column:connection_mode;type:text;not null;default:'wg_vless_l3'"`
+	OwnerUserID             string    `gorm:"column:owner_user_id;type:text;index"`
+	PolicyJSON              string    `gorm:"column:policy_json;type:text;not null;default:''"`
+	ConfigGeneration        uint64    `gorm:"column:config_generation;not null;default:1"`
+	CreatedAt               time.Time `gorm:"column:created_at;not null;autoCreateTime"`
+	UpdatedAt               time.Time `gorm:"column:updated_at;not null;autoUpdateTime"`
+}
+
+func (NetworkRecord) TableName() string { return "overlay_networks" }
+
+type InviteRecord struct {
+	ID            string     `gorm:"column:id;type:text;primaryKey"`
+	NetworkID     string     `gorm:"column:network_id;type:text;not null;index"`
+	TokenHash     string     `gorm:"column:token_hash;type:text;not null;uniqueIndex"`
+	DeviceID      string     `gorm:"column:device_id;type:text"`
+	Platform      string     `gorm:"column:platform;type:text"`
+	Role          string     `gorm:"column:role;type:text;not null;default:'one'"`
+	ExpiresAt     time.Time  `gorm:"column:expires_at;not null;index"`
+	RemainingUses int        `gorm:"column:remaining_uses;not null"`
+	ConsumedAt    *time.Time `gorm:"column:consumed_at"`
+	CreatedAt     time.Time  `gorm:"column:created_at;not null;autoCreateTime"`
+}
+
+func (InviteRecord) TableName() string { return "overlay_invites" }
+
+type DeviceRecord struct {
+	ID string `gorm:"column:id;type:text;primaryKey"`
+	// UserUUID preserves the original Accounts overlay_devices ownership
+	// contract. UAT and production already require this UUID column, while the
+	// formal Zero API uses UserID for explicit per-user queries. New Zero
+	// devices therefore dual-write both representations of the same owner.
+	UserUUID           string     `gorm:"column:user_uuid;type:uuid;not null;primaryKey"`
+	UserID             string     `gorm:"column:user_id;type:text;index"`
+	NetworkID          string     `gorm:"column:network_id;type:text;not null;index"`
+	Role               string     `gorm:"column:role;type:text;not null;default:'one';index"`
+	Name               string     `gorm:"column:name;type:text;not null"`
+	Platform           string     `gorm:"column:platform;type:text;not null"`
+	Hostname           string     `gorm:"column:hostname;type:text;not null"`
+	WireGuardPublicKey string     `gorm:"column:wireguard_public_key;type:text;not null"`
+	WireGuardAddress   string     `gorm:"column:wireguard_address;type:text;not null"`
+	Status             string     `gorm:"column:status;type:text;not null;index"`
+	LastSeenAt         *time.Time `gorm:"column:last_seen_at"`
+	CreatedAt          time.Time  `gorm:"column:created_at;not null;autoCreateTime"`
+	UpdatedAt          time.Time  `gorm:"column:updated_at;not null;autoUpdateTime"`
+}
+
+func (DeviceRecord) TableName() string { return "overlay_devices" }
+
+type CredentialRecord struct {
+	ID           string     `gorm:"column:id;type:text;primaryKey"`
+	DeviceID     string     `gorm:"column:device_id;type:text;not null;index"`
+	CredentialID string     `gorm:"column:credential_id;type:text;not null;uniqueIndex"`
+	TokenHash    string     `gorm:"column:token_hash;type:text;not null;uniqueIndex"`
+	IssuedAt     time.Time  `gorm:"column:issued_at;not null"`
+	ExpiresAt    time.Time  `gorm:"column:expires_at;not null;index"`
+	RevokedAt    *time.Time `gorm:"column:revoked_at"`
+	CreatedAt    time.Time  `gorm:"column:created_at;not null;autoCreateTime"`
+}
+
+func (CredentialRecord) TableName() string { return "overlay_device_credentials" }
+
+type EnrollmentRecord struct {
+	ID         string     `gorm:"column:id;type:text;primaryKey"`
+	DeviceID   string     `gorm:"column:device_id;type:text;not null;index"`
+	TokenHash  string     `gorm:"column:token_hash;type:text;not null;uniqueIndex"`
+	IssuedAt   time.Time  `gorm:"column:issued_at;not null"`
+	ExpiresAt  time.Time  `gorm:"column:expires_at;not null;index"`
+	ConsumedAt *time.Time `gorm:"column:consumed_at"`
+	CreatedAt  time.Time  `gorm:"column:created_at;not null;autoCreateTime"`
+}
+
+func (EnrollmentRecord) TableName() string { return "overlay_enrollment_sessions" }
+
+type AckRecord struct {
+	ID         string    `gorm:"column:id;type:text;primaryKey"`
+	DeviceID   string    `gorm:"column:device_id;type:text;not null;index"`
+	NetworkID  string    `gorm:"column:network_id;type:text;not null;index"`
+	Generation uint64    `gorm:"column:generation;not null"`
+	ConfigID   string    `gorm:"column:config_id;type:text;not null"`
+	AppliedAt  time.Time `gorm:"column:applied_at;not null"`
+	ReceivedAt time.Time `gorm:"column:received_at;not null"`
+}
+
+func (AckRecord) TableName() string { return "overlay_signed_config_acks" }
+
+// RegistrationRecord stores a requested One identity before owner approval.
+// The raw token is returned once and never persists; the public key is a
+// declaration, not hardware attestation.
+type RegistrationRecord struct {
+	ID                            string     `gorm:"column:id;type:text;primaryKey"`
+	NetworkID                     string     `gorm:"column:network_id;type:text;not null;index"`
+	OwnerUserID                   string     `gorm:"column:owner_user_id;type:text;not null;index"`
+	DeviceID                      string     `gorm:"column:device_id;type:text;not null;index"`
+	Name                          string     `gorm:"column:name;type:text;not null;default:''"`
+	Hostname                      string     `gorm:"column:hostname;type:text;not null;default:''"`
+	Platform                      string     `gorm:"column:platform;type:text;not null"`
+	WireGuardPublicKey            string     `gorm:"column:wireguard_public_key;type:text;not null"`
+	WireGuardPublicKeyFingerprint string     `gorm:"column:wireguard_public_key_fingerprint;type:text;not null;index"`
+	TokenHash                     string     `gorm:"column:token_hash;type:text;not null;uniqueIndex"`
+	Status                        string     `gorm:"column:status;type:text;not null;index"`
+	ExpiresAt                     time.Time  `gorm:"column:expires_at;not null;index"`
+	ApprovedAt                    *time.Time `gorm:"column:approved_at"`
+	RejectedAt                    *time.Time `gorm:"column:rejected_at"`
+	ConsumedAt                    *time.Time `gorm:"column:consumed_at"`
+	CreatedAt                     time.Time  `gorm:"column:created_at;not null;autoCreateTime;index"`
+	UpdatedAt                     time.Time  `gorm:"column:updated_at;not null;autoUpdateTime"`
+}
+
+func (RegistrationRecord) TableName() string { return "overlay_registrations" }
+
+type DeviceTelemetryRecord struct {
+	NetworkID         string     `gorm:"column:network_id;type:text;primaryKey"`
+	DeviceID          string     `gorm:"column:device_id;type:text;primaryKey"`
+	Role              string     `gorm:"column:role;type:text;not null;default:'one';index"`
+	Healthy           bool       `gorm:"column:healthy;not null;default:false"`
+	ConnectionMode    string     `gorm:"column:connection_mode;type:text;not null;default:''"`
+	AppliedConfigID   string     `gorm:"column:applied_config_id;type:text;not null;default:''"`
+	AppliedGeneration uint64     `gorm:"column:applied_generation;not null;default:0"`
+	ActivePath        string     `gorm:"column:active_path;type:text;not null;default:''"`
+	Endpoint          string     `gorm:"column:endpoint;type:text;not null;default:''"`
+	RTTMillis         int64      `gorm:"column:rtt_ms;not null;default:0"`
+	RxBytes           uint64     `gorm:"column:rx_bytes;not null;default:0"`
+	TxBytes           uint64     `gorm:"column:tx_bytes;not null;default:0"`
+	InternetRxBytes   uint64     `gorm:"column:internet_rx_bytes;not null;default:0"`
+	InternetTxBytes   uint64     `gorm:"column:internet_tx_bytes;not null;default:0"`
+	PrivateRxBytes    uint64     `gorm:"column:private_rx_bytes;not null;default:0"`
+	PrivateTxBytes    uint64     `gorm:"column:private_tx_bytes;not null;default:0"`
+	LatestHandshakeAt *time.Time `gorm:"column:latest_handshake_at"`
+	PeersJSON         string     `gorm:"column:peers_json;type:text;not null;default:'[]'"`
+	TopAppsJSON       string     `gorm:"column:top_apps_json;type:text;not null;default:'[]'"`
+	SampledAt         time.Time  `gorm:"column:sampled_at;not null"`
+	UpdatedAt         time.Time  `gorm:"column:updated_at;not null;autoUpdateTime"`
+}
+
+func (DeviceTelemetryRecord) TableName() string { return "overlay_device_telemetry" }
+
+type NetworkMemberRecord struct {
+	ID        string    `gorm:"column:id;type:text;primaryKey"`
+	NetworkID string    `gorm:"column:network_id;type:text;not null;uniqueIndex:idx_overlay_network_member"`
+	UserID    string    `gorm:"column:user_id;type:text;not null;uniqueIndex:idx_overlay_network_member"`
+	Email     string    `gorm:"column:email;type:text;not null;default:''"`
+	CreatedBy string    `gorm:"column:created_by;type:text;not null;default:''"`
+	CreatedAt time.Time `gorm:"column:created_at;not null;autoCreateTime"`
+}
+
+func (NetworkMemberRecord) TableName() string { return "overlay_network_members" }
+
+type Repository struct{ DB *gorm.DB }
+
+func NewRepository(db *gorm.DB) (*Repository, error) {
+	if db == nil {
+		return nil, errors.New("overlay repository requires a database")
+	}
+	return &Repository{DB: db}, nil
+}
+
+func AutoMigrate(db *gorm.DB) error {
+	if db == nil {
+		return errors.New("overlay migration requires a database")
+	}
+	return db.AutoMigrate(&NetworkRecord{}, &InviteRecord{}, &DeviceRecord{}, &CredentialRecord{}, &EnrollmentRecord{}, &AckRecord{}, &RegistrationRecord{}, &DeviceTelemetryRecord{}, &NetworkMemberRecord{})
+}
+
+func HashSecret(secret string) string {
+	sum := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(sum[:])
+}
+
+func (r *Repository) Seed(ctx context.Context, cfg BootstrapConfig, joinToken string) (string, error) {
+	cfg.Network = cfg.Network.withTransportDefaults()
+	if err := cfg.Network.validate(); err != nil {
+		return "", err
+	}
+	if cfg.Invite.ExpiresAt.IsZero() || !cfg.Invite.ExpiresAt.After(time.Now().UTC()) {
+		return "", ErrInvalidInput
+	}
+	role := cfg.Invite.Role
+	if role == "" {
+		role = RoleOne
+	}
+	if role != RoleOne && role != RoleGateway {
+		return "", ErrInvalidInput
+	}
+	joinToken = strings.TrimSpace(joinToken)
+	if joinToken == "" {
+		joinToken = newOpaqueToken("xjt_")
+	}
+	if err := r.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		network := NetworkRecord{
+			ID: cfg.Network.ID, DisplayName: cfg.Network.DisplayName, CIDR: cfg.Network.CIDR,
+			GatewayID: cfg.Network.GatewayID, GatewayWireGuardKey: cfg.Network.GatewayWireGuardKey,
+			GatewayWireGuardAddress: cfg.Network.GatewayWireGuardAddress,
+			GatewayEndpointHost:     cfg.Network.GatewayEndpointHost, GatewayEndpointPort: cfg.Network.GatewayEndpointPort,
+			TransportServerName: cfg.Network.TransportServerName, TransportPort: cfg.Network.TransportPort,
+			TransportAuthID: cfg.Network.TransportAuthID, TransportKind: cfg.Network.TransportKind,
+			TransportPath: cfg.Network.TransportPath, TransportMode: cfg.Network.TransportMode,
+			TransportHost: cfg.Network.TransportHost, GatewayFrontend: cfg.Network.GatewayFrontend,
+			GatewayListenSocket: cfg.Network.GatewayListenSocket, ConnectionMode: cfg.Network.ConnectionMode,
+			OwnerUserID: cfg.Network.OwnerUserID, PolicyJSON: "",
+			ConfigGeneration: 1,
+		}
+		var existing NetworkRecord
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", network.ID).First(&existing).Error; err == nil {
+			if strings.TrimSpace(existing.OwnerUserID) != strings.TrimSpace(network.OwnerUserID) {
+				return ErrForbidden
+			}
+			updates := map[string]any{
+				"display_name": network.DisplayName, "cidr": network.CIDR, "gateway_id": network.GatewayID,
+				"gateway_wireguard_key": network.GatewayWireGuardKey, "gateway_wireguard_address": network.GatewayWireGuardAddress, "gateway_endpoint_host": network.GatewayEndpointHost,
+				"gateway_endpoint_port": network.GatewayEndpointPort, "transport_server_name": network.TransportServerName,
+				"transport_port": network.TransportPort, "transport_auth_id": network.TransportAuthID,
+				"transport_kind": network.TransportKind, "transport_path": network.TransportPath,
+				"transport_mode": network.TransportMode, "transport_host": network.TransportHost,
+				"owner_user_id":    network.OwnerUserID,
+				"gateway_frontend": network.GatewayFrontend, "gateway_listen_socket": network.GatewayListenSocket,
+			}
+			if err := tx.Model(&NetworkRecord{}).Where("id = ?", network.ID).Updates(updates).Error; err != nil {
+				return err
+			}
+			// A frontend change rewires the Gateway's Xray listener, so the
+			// Gateway must re-apply its runtime: issue a new generation.
+			if existing.GatewayFrontend != network.GatewayFrontend || existing.GatewayListenSocket != network.GatewayListenSocket {
+				if err := advanceNetworkGeneration(tx, &existing); err != nil {
+					return err
+				}
+			}
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		} else if err := tx.Create(&network).Error; err != nil {
+			return err
+		}
+		invite := InviteRecord{ID: uuid.NewString(), NetworkID: cfg.Network.ID, TokenHash: HashSecret(joinToken), DeviceID: cfg.Invite.DeviceID, Platform: cfg.Invite.Platform, Role: role, ExpiresAt: cfg.Invite.ExpiresAt.UTC().Truncate(time.Second), RemainingUses: 1}
+		return tx.Where("token_hash = ?", invite.TokenHash).FirstOrCreate(&invite).Error
+	}); err != nil {
+		return "", err
+	}
+	return joinToken, nil
+}
+
+// DeleteNetwork removes one owner's network and its network-scoped control
+// plane records atomically. Device credentials and enrollment sessions are
+// keyed only by device ID, so refuse deletion if that ID is shared with a
+// device on another network rather than accidentally deleting the other
+// network's credentials.
+func (r *Repository) DeleteNetwork(ctx context.Context, ownerUserID, networkID string) error {
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	networkID = strings.TrimSpace(networkID)
+	if ownerUserID == "" || networkID == "" {
+		return ErrInvalidInput
+	}
+	return r.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var network NetworkRecord
+		query := tx.Clauses(clause.Locking{Strength: "UPDATE"})
+		if isRootAdmin(ctx) {
+			query = query.Where("id = ?", networkID)
+		} else {
+			query = query.Where("id = ? AND owner_user_id = ?", networkID, ownerUserID)
+		}
+		if err := query.First(&network).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return err
+		}
+
+		var devices []DeviceRecord
+		if err := tx.Select("id").Where("network_id = ?", networkID).Find(&devices).Error; err != nil {
+			return err
+		}
+		deviceIDs := make([]string, 0, len(devices))
+		for _, device := range devices {
+			deviceIDs = append(deviceIDs, device.ID)
+		}
+		if len(deviceIDs) > 0 {
+			var sharedIDs int64
+			if err := tx.Model(&DeviceRecord{}).
+				Where("id IN ? AND network_id <> ?", deviceIDs, networkID).
+				Count(&sharedIDs).Error; err != nil {
+				return err
+			}
+			if sharedIDs > 0 {
+				return ErrDeviceConflict
+			}
+			for _, table := range []string{"overlay_device_credentials", "overlay_enrollment_sessions"} {
+				if tx.Migrator().HasTable(table) {
+					if err := tx.Exec("DELETE FROM "+table+" WHERE device_id IN ?", deviceIDs).Error; err != nil {
+						return err
+					}
+				}
+			}
+		}
+
+		// These legacy tables may be absent in fresh Zero-only installations;
+		// when present, remove stale network records as part of the same delete.
+		for _, table := range []string{
+			"overlay_device_telemetry",
+			"overlay_network_members",
+			"overlay_signed_config_acks",
+			"overlay_registrations",
+			"overlay_invites",
+			"overlay_config_acks",
+			"overlay_nodes",
+			"overlay_devices",
+		} {
+			if !tx.Migrator().HasTable(table) {
+				continue
+			}
+			if err := tx.Exec("DELETE FROM "+table+" WHERE network_id = ?", networkID).Error; err != nil {
+				return err
+			}
+		}
+		deleteQuery := tx
+		if isRootAdmin(ctx) {
+			deleteQuery = deleteQuery.Where("id = ?", networkID)
+		} else {
+			deleteQuery = deleteQuery.Where("id = ? AND owner_user_id = ?", networkID, ownerUserID)
+		}
+		result := deleteQuery.Delete(&NetworkRecord{})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrNotFound
+		}
+		return nil
+	})
+}
+
+func (r *Repository) peekInvite(ctx context.Context, tokenHash string) (InviteRecord, error) {
+	var invite InviteRecord
+	if err := r.DB.WithContext(ctx).Where("token_hash = ?", tokenHash).First(&invite).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return invite, ErrInvalidToken
+		}
+		return invite, err
+	}
+	return invite, nil
+}
+
+func (r *Repository) network(ctx context.Context, id string) (NetworkRecord, error) {
+	var record NetworkRecord
+	err := r.DB.WithContext(ctx).Omit("policy_json").Where("id = ?", id).First(&record).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return record, ErrNotFound
+	}
+	return record, err
+}
+
+func (r *Repository) networkPolicyJSON(ctx context.Context, id string) (uint64, string, error) {
+	var record struct {
+		ConfigGeneration uint64 `gorm:"column:config_generation"`
+		PolicyJSON       string `gorm:"column:policy_json"`
+	}
+	err := r.DB.WithContext(ctx).Model(&NetworkRecord{}).Select("config_generation", "policy_json").Where("id = ?", id).First(&record).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, "", ErrNotFound
+	}
+	return record.ConfigGeneration, record.PolicyJSON, err
+}
+
+func (r *Repository) allocateAddress(tx *gorm.DB, network NetworkRecord) (string, error) {
+	prefix, err := netip.ParsePrefix(network.CIDR)
+	if err != nil {
+		return "", ErrInvalidInput
+	}
+	gatewayAddress := prefix.Addr().Next()
+	if configured := strings.TrimSpace(network.GatewayWireGuardAddress); configured != "" {
+		parsed, parseErr := netip.ParsePrefix(configured)
+		if parseErr != nil || !prefix.Contains(parsed.Addr()) {
+			return "", ErrInvalidInput
+		}
+		gatewayAddress = parsed.Addr()
+	}
+	for candidate := prefix.Addr(); prefix.Contains(candidate); candidate = candidate.Next() {
+		if candidate == prefix.Addr() {
+			continue
+		}
+		address := candidate.String() + "/32"
+		if candidate == gatewayAddress {
+			continue
+		}
+		var count int64
+		if err := tx.Model(&DeviceRecord{}).Where("network_id = ? AND wireguard_address = ?", network.ID, address).Count(&count).Error; err != nil {
+			return "", err
+		}
+		if count == 0 {
+			return address, nil
+		}
+	}
+	return "", errors.New("overlay network address pool exhausted")
+}
+
+func (r *Repository) createDevice(ctx context.Context, tokenHash string, request ExchangeRequest, now time.Time, credential CredentialRecord, enrollment EnrollmentRecord) (InviteRecord, DeviceRecord, NetworkRecord, error) {
+	var invite InviteRecord
+	var device DeviceRecord
+	var network NetworkRecord
+	err := r.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&InviteRecord{}).Where("token_hash = ? AND remaining_uses > 0 AND expires_at > ? AND consumed_at IS NULL", tokenHash, now).Updates(map[string]any{"remaining_uses": 0, "consumed_at": now})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrInvalidToken
+		}
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("token_hash = ?", tokenHash).First(&invite).Error; err != nil {
+			return err
+		}
+		var networkErr error
+		network, networkErr = r.networkTx(tx, invite.NetworkID)
+		if networkErr != nil {
+			return networkErr
+		}
+		if invite.Role == RoleGateway && request.WireGuardPublicKey != network.GatewayWireGuardKey {
+			return ErrInvalidInput
+		}
+		var existing DeviceRecord
+		existingErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND network_id = ?", request.DeviceID, invite.NetworkID).First(&existing).Error
+		if existingErr == nil {
+			switch invite.Role {
+			case RoleGateway:
+				// A Gateway's local state can outlive a control-plane reset. Permit
+				// a fresh, device-bound Gateway invitation to rotate only its credential
+				// when the network's pinned WireGuard identity is unchanged.
+				if existing.Role != RoleGateway || existing.Status != "active" ||
+					existing.WireGuardPublicKey != request.WireGuardPublicKey || existing.ID != network.GatewayID {
+					return ErrDeviceConflict
+				}
+				if err := tx.Model(&CredentialRecord{}).Where("device_id = ? AND revoked_at IS NULL", existing.ID).Update("revoked_at", now).Error; err != nil {
+					return err
+				}
+				credential.DeviceID = existing.ID
+				enrollment.DeviceID = existing.ID
+				if err := tx.Create(&credential).Error; err != nil {
+					return err
+				}
+				if err := tx.Create(&enrollment).Error; err != nil {
+					return err
+				}
+				device = existing
+				return nil
+			case RoleOne:
+				// Idempotent re-join for an already-bound One node on the same network:
+				// preserve device_id, fixed Overlay WireGuard IP, owner binding, and ACL
+				// policy references; rotate credentials and update WireGuard key if changed.
+				if existing.Role != RoleOne || request.DeviceID == network.GatewayID || request.WireGuardPublicKey == network.GatewayWireGuardKey {
+					return ErrDeviceConflict
+				}
+				var keyConflict int64
+				if err := tx.Model(&DeviceRecord{}).
+					Where("network_id = ? AND id <> ? AND wireguard_public_key = ?", network.ID, existing.ID, request.WireGuardPublicKey).
+					Count(&keyConflict).Error; err != nil {
+					return err
+				}
+				if keyConflict > 0 {
+					return ErrDeviceConflict
+				}
+				address := existing.WireGuardAddress
+				if strings.TrimSpace(address) == "" {
+					var allocErr error
+					address, allocErr = r.allocateAddress(tx, network)
+					if allocErr != nil {
+						return allocErr
+					}
+				}
+				needsGenerationBump := existing.WireGuardPublicKey != request.WireGuardPublicKey ||
+					existing.Status != "active" ||
+					existing.WireGuardAddress != address
+				if err := tx.Model(&CredentialRecord{}).Where("device_id = ? AND revoked_at IS NULL", existing.ID).Update("revoked_at", now).Error; err != nil {
+					return err
+				}
+				if err := tx.Model(&DeviceRecord{}).Where("id = ? AND network_id = ?", existing.ID, network.ID).Updates(map[string]any{
+					"name":                 request.Name,
+					"platform":             request.Platform,
+					"hostname":             request.Hostname,
+					"wireguard_public_key": request.WireGuardPublicKey,
+					"wireguard_address":    address,
+					"status":               "active",
+					"updated_at":           now,
+				}).Error; err != nil {
+					return err
+				}
+				existing.Name = request.Name
+				existing.Platform = request.Platform
+				existing.Hostname = request.Hostname
+				existing.WireGuardPublicKey = request.WireGuardPublicKey
+				existing.WireGuardAddress = address
+				existing.Status = "active"
+				existing.UpdatedAt = now
+				if needsGenerationBump {
+					if err := advanceNetworkGeneration(tx, &network); err != nil {
+						return err
+					}
+				}
+				credential.DeviceID = existing.ID
+				enrollment.DeviceID = existing.ID
+				if err := tx.Create(&credential).Error; err != nil {
+					return err
+				}
+				if err := tx.Create(&enrollment).Error; err != nil {
+					return err
+				}
+				device = existing
+				return nil
+			default:
+				return ErrDeviceConflict
+			}
+		}
+		if !errors.Is(existingErr, gorm.ErrRecordNotFound) {
+			return existingErr
+		}
+		address := network.GatewayWireGuardAddress
+		if invite.Role != RoleGateway {
+			var err error
+			address, err = r.allocateAddress(tx, network)
+			if err != nil {
+				return err
+			}
+		}
+		device = DeviceRecord{ID: request.DeviceID, UserUUID: network.OwnerUserID, UserID: network.OwnerUserID, NetworkID: invite.NetworkID, Role: invite.Role, Name: request.Name, Platform: request.Platform, Hostname: request.Hostname, WireGuardPublicKey: request.WireGuardPublicKey, WireGuardAddress: address, Status: "active", CreatedAt: now, UpdatedAt: now}
+		if err := tx.Create(&device).Error; err != nil {
+			return err
+		}
+		if err := advanceNetworkGeneration(tx, &network); err != nil {
+			return err
+		}
+		credential.DeviceID = device.ID
+		enrollment.DeviceID = device.ID
+		if err := tx.Create(&credential).Error; err != nil {
+			return err
+		}
+		return tx.Create(&enrollment).Error
+	})
+	return invite, device, network, err
+}
+
+func (r *Repository) networkTx(tx *gorm.DB, id string) (NetworkRecord, error) {
+	var network NetworkRecord
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", id).First(&network).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return network, ErrNotFound
+		}
+		return network, err
+	}
+	return network, nil
+}
+
+func (r *Repository) credential(ctx context.Context, hash string) (CredentialRecord, DeviceRecord, NetworkRecord, error) {
+	var credential CredentialRecord
+	if err := r.DB.WithContext(ctx).Where("token_hash = ?", hash).First(&credential).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return credential, DeviceRecord{}, NetworkRecord{}, ErrInvalidToken
+		}
+		return credential, DeviceRecord{}, NetworkRecord{}, err
+	}
+	var device DeviceRecord
+	if err := r.DB.WithContext(ctx).Where("id = ?", credential.DeviceID).First(&device).Error; err != nil {
+		return credential, device, NetworkRecord{}, err
+	}
+	network, err := r.network(ctx, device.NetworkID)
+	return credential, device, network, err
+}
+
+func (r *Repository) enrollment(ctx context.Context, hash string) (EnrollmentRecord, DeviceRecord, NetworkRecord, error) {
+	var enrollment EnrollmentRecord
+	if err := r.DB.WithContext(ctx).Where("token_hash = ?", hash).First(&enrollment).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return enrollment, DeviceRecord{}, NetworkRecord{}, ErrInvalidToken
+		}
+		return enrollment, DeviceRecord{}, NetworkRecord{}, err
+	}
+	var device DeviceRecord
+	if err := r.DB.WithContext(ctx).Where("id = ?", enrollment.DeviceID).First(&device).Error; err != nil {
+		return enrollment, device, NetworkRecord{}, err
+	}
+	network, err := r.network(ctx, device.NetworkID)
+	return enrollment, device, network, err
+}
+
+func (r *Repository) userDevice(ctx context.Context, userID, deviceID string) (DeviceRecord, NetworkRecord, error) {
+	var device DeviceRecord
+	query := r.DB.WithContext(ctx).Where("id = ? AND user_id = ? AND status = ?", deviceID, userID, "active")
+	if err := query.First(&device).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return device, NetworkRecord{}, ErrForbidden
+		}
+		return device, NetworkRecord{}, err
+	}
+	network, err := r.network(ctx, device.NetworkID)
+	return device, network, err
+}
+
+func (r *Repository) devices(ctx context.Context, networkID string) ([]DeviceRecord, error) {
+	var devices []DeviceRecord
+	if err := r.DB.WithContext(ctx).Where("network_id = ? AND status = ?", networkID, "active").Order("id ASC").Find(&devices).Error; err != nil {
+		return nil, err
+	}
+	return devices, nil
+}
+
+func (r *Repository) ack(ctx context.Context, request SignedConfigAckRequest, device DeviceRecord, network NetworkRecord, now time.Time) (SignedConfigAckResponse, error) {
+	if request.Generation != network.ConfigGeneration {
+		return SignedConfigAckResponse{}, ErrGenerationConflict
+	}
+	var existing AckRecord
+	err := r.DB.WithContext(ctx).Where("device_id = ? AND generation = ?", device.ID, request.Generation).First(&existing).Error
+	if err == nil {
+		if existing.ConfigID != request.ConfigID || existing.DeviceID != request.DeviceID {
+			return SignedConfigAckResponse{}, ErrGenerationConflict
+		}
+		if err := r.DB.WithContext(ctx).Model(&DeviceRecord{}).Where("id = ?", device.ID).Updates(map[string]any{
+			"last_seen_at": now.UTC(), "updated_at": now.UTC(),
+		}).Error; err != nil {
+			return SignedConfigAckResponse{}, err
+		}
+		return ackResponse(existing, true), nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return SignedConfigAckResponse{}, err
+	}
+	record := AckRecord{ID: uuid.NewString(), DeviceID: device.ID, NetworkID: network.ID, Generation: request.Generation, ConfigID: request.ConfigID, AppliedAt: request.AppliedAt.UTC().Truncate(time.Second), ReceivedAt: now.UTC().Truncate(time.Second)}
+	if err := r.DB.WithContext(ctx).Create(&record).Error; err != nil {
+		return SignedConfigAckResponse{}, err
+	}
+	if err := r.DB.WithContext(ctx).Model(&DeviceRecord{}).Where("id = ?", device.ID).Updates(map[string]any{
+		"last_seen_at": now.UTC(), "updated_at": now.UTC(),
+	}).Error; err != nil {
+		return SignedConfigAckResponse{}, err
+	}
+	return ackResponse(record, false), nil
+}
+
+func ackResponse(record AckRecord, duplicate bool) SignedConfigAckResponse {
+	return SignedConfigAckResponse{Acked: true, Duplicate: duplicate, Ack: SignedConfigAck{DeviceID: record.DeviceID, ConfigID: record.ConfigID, Generation: record.Generation, AppliedAt: record.AppliedAt.UTC(), ReceivedAt: record.ReceivedAt.UTC()}}
+}
+
+func (r *Repository) ackUser(ctx context.Context, request SignedConfigAckRequest, userID string, network NetworkRecord, now time.Time) (SignedConfigAckResponse, error) {
+	device, _, err := r.userDevice(ctx, userID, request.DeviceID)
+	if err != nil {
+		return SignedConfigAckResponse{}, err
+	}
+	return r.ack(ctx, request, device, network, now)
+}
+
+// Membership changes advance the signed snapshot and keep an existing ACL
+// artifact bound to that generation, without changing its rules.
+func advanceNetworkGeneration(tx *gorm.DB, network *NetworkRecord) error {
+	next := network.ConfigGeneration + 1
+	updates := map[string]any{"config_generation": next}
+	if strings.TrimSpace(network.PolicyJSON) != "" {
+		var policy PolicyArtifact
+		if err := json.Unmarshal([]byte(network.PolicyJSON), &policy); err != nil {
+			return err
+		}
+		if policy.NetworkID != network.ID || policy.Revision != network.ConfigGeneration {
+			return ErrGenerationConflict
+		}
+		policy.Revision = next
+		raw, err := json.Marshal(policy)
+		if err != nil {
+			return err
+		}
+		network.PolicyJSON = string(raw)
+		updates["policy_json"] = network.PolicyJSON
+	}
+	result := tx.Model(&NetworkRecord{}).Where("id = ? AND config_generation = ?", network.ID, network.ConfigGeneration).Updates(updates)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrGenerationConflict
+	}
+	network.ConfigGeneration = next
+	return nil
+}

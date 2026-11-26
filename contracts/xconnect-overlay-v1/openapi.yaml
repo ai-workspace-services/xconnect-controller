@@ -1,0 +1,127 @@
+openapi: 3.1.0
+info:
+  title: XConnect Controller API (Overlay V1)
+  version: 1.0.0
+  description: >
+    Authoritative control-plane contract shared between the self-hosted Go service
+    (xconnect-controller) and the Cloudflare Worker edge runtime (xconnect-controller-edge).
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe
+      responses:
+        '200': { description: Healthy }
+  /readyz:
+    get:
+      summary: Readiness probe (database connectivity)
+      responses:
+        '200': { description: Ready }
+        '503': { description: Database unavailable }
+  /api/overlay/v1/registrations:
+    post:
+      summary: Submit pending XConnect-One registration declaration
+      responses:
+        '201': { description: Registration created }
+  /api/overlay/v1/registrations/{registrationID}/exchange:
+    post:
+      summary: Poll or exchange approved registration declaration for device credentials
+      responses:
+        '200': { description: Exchanged }
+        '202': { description: Pending approval }
+  /api/overlay/v1/join-tokens/exchange:
+    post:
+      summary: Exchange join invitation token (supports idempotent re-join for bound One devices)
+      responses:
+        '200': { description: Enrolled }
+  /api/overlay/v1/device/session:
+    post:
+      summary: Mint short-lived enrollment bearer session from durable device credential
+      responses:
+        '200': { description: Session minted }
+  /api/overlay/v1/enrollment/signed-config:
+    get:
+      summary: Fetch signed client config (v1 JSON or v2 policy-bound media type, ETag 304)
+      responses:
+        '200': { description: Signed config }
+        '304': { description: Not modified }
+  /api/overlay/v1/gateway/signed-config:
+    get:
+      summary: Fetch signed gateway config (v1 or v2 with peers + policy artifact, ETag 304)
+      responses:
+        '200': { description: Gateway signed config }
+        '304': { description: Not modified }
+  /api/overlay/v1/enrollment/signed-config/{generation}/ack:
+    post:
+      summary: Acknowledge applied signed config generation
+      responses:
+        '200': { description: Acknowledged }
+  /api/overlay/v1/enrollment/policy-artifacts/{generation}/{digest}:
+    get:
+      summary: Fetch immutable content-addressed client policy artifact
+      responses:
+        '200': { description: Canonical policy artifact }
+        '304': { description: Not modified }
+  /api/overlay/v1/signing-keys:
+    get:
+      summary: Fetch current and previous Ed25519 verification keys (User JWT via JWKS)
+      responses:
+        '200': { description: Signing key ring }
+  /api/overlay/v1/gateways:
+    get:
+      summary: List gateways accessible to the authenticated user
+      responses:
+        '200': { description: Gateways }
+  /api/overlay/v1/devices/enroll:
+    post:
+      summary: Directly enroll or idempotently re-enroll a user-owned One device
+      responses:
+        '200': { description: Enrolled }
+  /api/overlay/v1/signed-config:
+    get:
+      summary: Fetch signed config using user JWT
+      responses:
+        '200': { description: Signed config }
+  /api/overlay/v1/signed-config/{generation}/ack:
+    post:
+      summary: Acknowledge signed config using user JWT
+      responses:
+        '200': { description: Acknowledged }
+  /api/overlay/v1/admin/overview:
+    get: { summary: Admin overview, responses: { '200': { description: Overview } } }
+  /api/overlay/v1/admin/telemetry:
+    get: { summary: Admin gateway/peer telemetry, responses: { '200': { description: Telemetry } } }
+  /api/overlay/v1/admin/networks:
+    get: { summary: List networks, responses: { '200': { description: Networks } } }
+  /api/overlay/v1/admin/networks/bootstrap:
+    post: { summary: Bootstrap network and initial invite, responses: { '201': { description: Bootstrapped } } }
+  /api/overlay/v1/admin/networks/{networkID}:
+    delete: { summary: Delete network, responses: { '204': { description: Deleted } } }
+  /api/overlay/v1/admin/networks/{networkID}/mode:
+    put: { summary: Update network connection mode, responses: { '200': { description: Updated } } }
+  /api/overlay/v1/admin/networks/{networkID}/members:
+    get: { summary: List network members, responses: { '200': { description: Members } } }
+    post: { summary: Bind network member, responses: { '200': { description: Bound } } }
+  /api/overlay/v1/admin/networks/{networkID}/members/{userID}:
+    delete: { summary: Remove network member, responses: { '200': { description: Removed } } }
+  /api/overlay/v1/admin/networks/{networkID}/policy:
+    get: { summary: Get forwarding policy, responses: { '200': { description: Policy } } }
+    put: { summary: Update forwarding policy, responses: { '200': { description: Updated policy } } }
+  /api/overlay/v1/admin/networks/{networkID}/policy/explain:
+    post: { summary: Explain policy decision (with default ICMP allow), responses: { '200': { description: Decision } } }
+  /api/overlay/v1/admin/devices:
+    get: { summary: List devices, responses: { '200': { description: Devices } } }
+  /api/overlay/v1/admin/devices/{deviceID}/revoke:
+    post: { summary: Revoke device, responses: { '204': { description: Revoked } } }
+  /api/overlay/v1/admin/invites:
+    get: { summary: List invites, responses: { '200': { description: Invites } } }
+    post: { summary: Create invite, responses: { '201': { description: Created } } }
+  /api/overlay/v1/admin/registrations:
+    get: { summary: List pending registrations, responses: { '200': { description: Registrations } } }
+  /api/overlay/v1/admin/registrations/{registrationID}/approve:
+    post: { summary: Approve registration, responses: { '200': { description: Approved } } }
+  /api/overlay/v1/admin/registrations/{registrationID}/reject:
+    post: { summary: Reject registration, responses: { '200': { description: Rejected } } }
+  /api/internal/overlay/networks/bootstrap:
+    post: { summary: Internal automation network bootstrap, responses: { '201': { description: Bootstrapped } } }
+  /api/internal/overlay/gateways/reconcile-stable-owner:
+    post: { summary: Internal UAT stable gateway reconciliation, responses: { '200': { description: Reconciled } } }
