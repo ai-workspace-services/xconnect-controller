@@ -21,8 +21,24 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
 
+  worker-ts:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workers/xconnect-controller-edge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: workers/xconnect-controller-edge/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
   container:
-    needs: test
+    needs: [test, worker-ts]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

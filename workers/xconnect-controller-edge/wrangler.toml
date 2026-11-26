@@ -1,0 +1,26 @@
+name = "xconnect-controller-edge"
+main = "src/index.ts"
+compatibility_date = "2025-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[hyperdrive]]
+binding = "HYPERDRIVE"
+id = "REPLACE_WITH_HYPERDRIVE_ID"
+# For local `wrangler dev`, configure either:
+#   CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE="postgres://postgres:postgres@127.0.0.1:5432/account"
+# or uncomment localConnectionString below during local testing only.
+# localConnectionString = "postgres://postgres:postgres@127.0.0.1:5432/account"
+
+[vars]
+ACCOUNTS_JWKS_URL = "https://accounts.svc.plus/.well-known/jwks.json"
+XCONNECT_OVERLAY_REQUIRE_SIGNING_KEY = "true"
+XCONNECT_OVERLAY_SIGNING_KEY_ID = "zero-signing-202611"
+XCONNECT_OVERLAY_LOCAL_PROXY_PORT = "51830"
+XCONNECT_GATEWAY_XRAY_FRONTEND = "caddy-unix-h2c"
+XCONNECT_GATEWAY_XRAY_LISTEN_SOCKET = "/run/xconnect-gateway/xray.sock"
+# Secrets (never commit):
+#   npx wrangler secret put XCONNECT_OVERLAY_SIGNING_PRIVATE_KEY
+#   npx wrangler secret put JWT_ACCESS_SECRET
+#   npx wrangler secret put XCONNECT_OVERLAY_PREVIOUS_SIGNING_KEY_ID
+#   npx wrangler secret put XCONNECT_OVERLAY_PREVIOUS_SIGNING_PUBLIC_KEY
+#   npx wrangler secret put XCONNECT_OVERLAY_PREVIOUS_SIGNING_NOT_AFTER
