@@ -20,6 +20,7 @@ import (
 
 	"github.com/ai-workspace-services/xconnect-controller/internal/auth"
 	"github.com/ai-workspace-services/xconnect-controller/internal/httpapi"
+	"github.com/ai-workspace-services/xconnect-controller/internal/observability"
 	"github.com/ai-workspace-services/xconnect-controller/internal/overlay"
 )
 
@@ -31,6 +32,9 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	stopTracing, ddEnabled := observability.ConfigureDDTrace("web-saas-xconnect-controller")
+	defer stopTracing()
 
 	db, err := openDatabase()
 	if err != nil {
@@ -65,9 +69,15 @@ func main() {
 	}
 	verifier := auth.NewVerifier(auth.VerifierConfigFromEnv(userReader))
 
+	var middlewares []gin.HandlerFunc
+	if ddEnabled {
+		middlewares = append(middlewares, observability.GinMiddleware("web-saas-xconnect-controller"))
+	}
+
 	router := httpapi.NewRouter(httpapi.Server{
-		Overlay:  overlayService,
-		Verifier: verifier,
+		Overlay:     overlayService,
+		Verifier:    verifier,
+		Middlewares: middlewares,
 		DBHealth: func(probeCtx context.Context) error {
 			sqlDB, sqlErr := db.DB()
 			if sqlErr != nil {

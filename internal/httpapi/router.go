@@ -17,13 +17,17 @@ import (
 )
 
 type Server struct {
-	Overlay  *overlay.Service
-	Verifier *auth.Verifier
-	DBHealth func(context.Context) error
+	Overlay     *overlay.Service
+	Verifier    *auth.Verifier
+	DBHealth    func(context.Context) error
+	Middlewares []gin.HandlerFunc
 }
 
 func NewRouter(s Server) *gin.Engine {
 	r := gin.New()
+	if len(s.Middlewares) > 0 {
+		r.Use(s.Middlewares...)
+	}
 	r.Use(gin.Recovery())
 	RegisterRoutes(r, s)
 	return r
