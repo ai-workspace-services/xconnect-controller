@@ -51,6 +51,13 @@ type UserReader interface {
 	LookupUserByEmail(ctx context.Context, email string) (*UserInfo, error)
 }
 
+// SessionReader optionally resolves opaque account session tokens from shared PostgreSQL public.sessions.
+type SessionReader interface {
+	LookupSessionUser(ctx context.Context, token string) (*UserInfo, error)
+}
+
+var ErrUserNotFound = errors.New("user not found")
+
 type GORMUserReader struct {
 	db *gorm.DB
 }
@@ -69,6 +76,31 @@ func (r *GORMUserReader) LookupUserByID(ctx context.Context, userID string) (*Us
 
 func (r *GORMUserReader) LookupUserByEmail(ctx context.Context, email string) (*UserInfo, error) {
 	return r.lookup(ctx, "LOWER(email) = LOWER(?)", strings.TrimSpace(email))
+}
+
+func (r *GORMUserReader) LookupSessionUser(ctx context.Context, token string) (*UserInfo, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("session store unavailable")
+	}
+	trimmed := strings.TrimSpace(token)
+	if trimmed == "" || !r.db.Migrator().HasTable("sessions") {
+		return nil, errors.New("session not found")
+	}
+	var sess struct {
+		UserUUID  string    `gorm:"column:user_uuid"`
+		ExpiresAt time.Time `gorm:"column:expires_at"`
+	}
+	if err := r.db.WithContext(ctx).Table("sessions").Select("user_uuid, expires_at").Where("token = ?", trimmed).Limit(1).Take(&sess).Error; err != nil {
+		return nil, err
+	}
+	if sess.ExpiresAt.IsZero() || !time.Now().UTC().Before(sess.ExpiresAt.UTC()) {
+		return nil, errors.New("session expired")
+	}
+	userUUID := strings.TrimSpace(sess.UserUUID)
+	if userUUID == "" {
+		return nil, errors.New("session user missing")
+	}
+	return r.LookupUserByID(ctx, userUUID)
 }
 
 func (r *GORMUserReader) userIDColumn() string {
@@ -397,20 +429,11 @@ func (v *Verifier) AuthMiddlewareAllowQueryToken() gin.HandlerFunc {
 	return v.authMiddleware(extractBearerCookieOrQuery)
 }
 
-func (v *Verifier) authMiddleware(extract func(*gin.Context) string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		token := extract(c)
-		if token == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "missing authorization header"})
-			c.Abort()
-			return
-		}
-		claims, err := v.ValidateAccessToken(c.Request.Context(), token)
-		if err != nil || strings.TrimSpace(claims.UserID) == "" || claims.UserID == "system" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired token"})
-			c.Abort()
-			return
-		}
+// ValidateTokenUser validates either an EdDSA/HS256 JWT access token or an opaque
+// session token stored in shared PostgreSQL public.sessions.
+func (v *Verifier) ValidateTokenUser(ctx context.Context, rawToken string) (*UserInfo, error) {
+	claims, err := v.ValidateAccessToken(ctx, rawToken)
+	if err == nil && strings.TrimSpace(claims.UserID) != "" && claims.UserID != "system" {
 		info := &UserInfo{
 			ID:     strings.TrimSpace(claims.UserID),
 			Email:  strings.TrimSpace(claims.Email),
@@ -423,18 +446,46 @@ func (v *Verifier) authMiddleware(extract func(*gin.Context) string) gin.Handler
 			info.Role = "user"
 		}
 		if v.userReader != nil {
-			dbInfo, dbErr := v.userReader.LookupUserByID(c.Request.Context(), info.ID)
+			dbInfo, dbErr := v.userReader.LookupUserByID(ctx, info.ID)
 			if dbErr != nil || dbInfo == nil {
+				return nil, ErrUserNotFound
+			}
+			return dbInfo, nil
+		}
+		return info, nil
+	}
+
+	if sr, ok := v.userReader.(SessionReader); ok {
+		if info, sessErr := sr.LookupSessionUser(ctx, rawToken); sessErr == nil && info != nil {
+			return info, nil
+		}
+	}
+
+	return nil, errors.New("invalid or expired token")
+}
+
+func (v *Verifier) authMiddleware(extract func(*gin.Context) string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		token := extract(c)
+		if token == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "missing authorization header"})
+			c.Abort()
+			return
+		}
+		info, err := v.ValidateTokenUser(c.Request.Context(), token)
+		if err != nil {
+			if errors.Is(err, ErrUserNotFound) {
 				c.JSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
-				c.Abort()
-				return
+			} else {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired token"})
 			}
-			if !dbInfo.Active || dbInfo.Suspended {
-				c.JSON(http.StatusForbidden, gin.H{"error": "account_suspended", "message": "your account has been suspended"})
-				c.Abort()
-				return
-			}
-			info = dbInfo
+			c.Abort()
+			return
+		}
+		if !info.Active || info.Suspended {
+			c.JSON(http.StatusForbidden, gin.H{"error": "account_suspended", "message": "your account has been suspended"})
+			c.Abort()
+			return
 		}
 		ctx := context.WithValue(c.Request.Context(), userIDKey, info.ID)
 		ctx = context.WithValue(ctx, emailKey, info.Email)

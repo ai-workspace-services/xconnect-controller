@@ -140,10 +140,14 @@ func (s *Service) GetAgentStatus(c *gin.Context) {
 			}
 		}
 		if agentIdentity == nil && s.verifier != nil {
-			claims, err := s.verifier.ValidateAccessToken(ctx, token)
-			if err == nil && strings.TrimSpace(claims.UserID) != "" && claims.UserID != "system" {
+			info, err := s.verifier.ValidateTokenUser(ctx, token)
+			if err == nil && info != nil {
+				if !info.Active || info.Suspended {
+					c.JSON(http.StatusForbidden, gin.H{"error": "account_suspended"})
+					return
+				}
 				if s.store != nil {
-					u, uErr := s.store.GetUserByID(ctx, claims.UserID)
+					u, uErr := s.store.GetUserByID(ctx, info.ID)
 					if uErr == nil && u != nil {
 						if !u.Active || u.ArchivedAt != nil {
 							c.JSON(http.StatusForbidden, gin.H{"error": "account_suspended"})
@@ -153,13 +157,16 @@ func (s *Service) GetAgentStatus(c *gin.Context) {
 					}
 				}
 				if jwtUser == nil {
-					role := "user"
-					if len(claims.Roles) > 0 {
-						role = strings.TrimSpace(claims.Roles[0])
+					role := strings.TrimSpace(info.Role)
+					if role == "" && len(info.Roles) > 0 {
+						role = strings.TrimSpace(info.Roles[0])
+					}
+					if role == "" {
+						role = "user"
 					}
 					jwtUser = &User{
-						ID:     strings.TrimSpace(claims.UserID),
-						Email:  strings.TrimSpace(claims.Email),
+						ID:     strings.TrimSpace(info.ID),
+						Email:  strings.TrimSpace(info.Email),
 						Role:   role,
 						Active: true,
 					}
