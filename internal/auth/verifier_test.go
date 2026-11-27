@@ -172,3 +172,109 @@ func TestGORMUserReaderAccountsUUIDSchema(t *testing.T) {
 		t.Fatalf("unexpected UserInfo: %+v", info)
 	}
 }
+
+func TestGORMUserReaderAndVerifierSessionFallback(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:auth-session-fallback?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := db.Exec(`
+		CREATE TABLE users (
+			uuid TEXT PRIMARY KEY,
+			email TEXT NOT NULL,
+			role TEXT NOT NULL,
+			active INTEGER NOT NULL,
+			permissions TEXT NOT NULL DEFAULT '[]'
+		);
+		CREATE TABLE account_quota_states (
+			account_uuid TEXT PRIMARY KEY,
+			suspend_state TEXT NOT NULL DEFAULT 'active'
+		);
+		CREATE TABLE sessions (
+			token TEXT PRIMARY KEY,
+			user_uuid TEXT NOT NULL,
+			expires_at DATETIME NOT NULL
+		);
+	`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`INSERT INTO users (uuid, email, role, active, permissions) VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?)`,
+		"usr-active", "active@example.test", "admin", 1, `["*"]`,
+		"usr-suspended", "suspended@example.test", "user", 1, `[]`,
+	).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`INSERT INTO account_quota_states (account_uuid, suspend_state) VALUES (?, ?), (?, ?)`,
+		"usr-active", "active",
+		"usr-suspended", "suspended",
+	).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`INSERT INTO sessions (token, user_uuid, expires_at) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)`,
+		"opaque-valid-session", "usr-active", now.Add(time.Hour),
+		"opaque-expired-session", "usr-active", now.Add(-time.Minute),
+		"opaque-suspended-session", "usr-suspended", now.Add(time.Hour),
+	).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	reader := NewGORMUserReader(db)
+	verifier := NewVerifier(VerifierConfig{
+		UserReader: reader,
+	})
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/gateways", verifier.AuthMiddleware(), func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"user_id": GetUserID(c)})
+	})
+	r.GET("/nodes", verifier.AuthMiddlewareAllowQueryToken(), func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"user_id": GetUserID(c)})
+	})
+
+	// 1. Valid opaque session token via Bearer header works on AuthMiddleware.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/gateways", nil)
+	req.Header.Set("Authorization", "Bearer opaque-valid-session")
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || rec.Body.String() != `{"user_id":"usr-active"}` {
+		t.Fatalf("valid session Bearer failed: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// 2. Valid opaque session token via xc_session cookie works on AuthMiddlewareAllowQueryToken.
+	recCookie := httptest.NewRecorder()
+	reqCookie := httptest.NewRequest(http.MethodGet, "/nodes", nil)
+	reqCookie.AddCookie(&http.Cookie{Name: "xc_session", Value: "opaque-valid-session"})
+	r.ServeHTTP(recCookie, reqCookie)
+	if recCookie.Code != http.StatusOK || recCookie.Body.String() != `{"user_id":"usr-active"}` {
+		t.Fatalf("valid session cookie failed: code=%d body=%s", recCookie.Code, recCookie.Body.String())
+	}
+
+	// 3. Expired opaque session token returns 401 invalid or expired token.
+	recExpired := httptest.NewRecorder()
+	reqExpired := httptest.NewRequest(http.MethodGet, "/gateways", nil)
+	reqExpired.Header.Set("Authorization", "Bearer opaque-expired-session")
+	r.ServeHTTP(recExpired, reqExpired)
+	if recExpired.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for expired session, got %d body=%s", recExpired.Code, recExpired.Body.String())
+	}
+
+	// 4. Unknown opaque session token returns 401 invalid or expired token.
+	recUnknown := httptest.NewRecorder()
+	reqUnknown := httptest.NewRequest(http.MethodGet, "/gateways", nil)
+	reqUnknown.Header.Set("Authorization", "Bearer unknown-token")
+	r.ServeHTTP(recUnknown, reqUnknown)
+	if recUnknown.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for unknown session, got %d body=%s", recUnknown.Code, recUnknown.Body.String())
+	}
+
+	// 5. Suspended user with valid session returns 403 account_suspended.
+	recSuspended := httptest.NewRecorder()
+	reqSuspended := httptest.NewRequest(http.MethodGet, "/gateways", nil)
+	reqSuspended.Header.Set("Authorization", "Bearer opaque-suspended-session")
+	r.ServeHTTP(recSuspended, reqSuspended)
+	if recSuspended.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for suspended user session, got %d body=%s", recSuspended.Code, recSuspended.Body.String())
+	}
+}
