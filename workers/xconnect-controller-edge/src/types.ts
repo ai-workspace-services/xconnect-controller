@@ -296,10 +296,135 @@ export interface UserGatewaySummary {
   last_seen_at?: string;
 }
 
+export interface AgentCredential {
+  id: string;
+  nodeId?: string;
+  name?: string;
+  token: string;
+  groups?: string[];
+  allowedEmails?: string[];
+}
+
+export interface AgentIdentity {
+  id: string;
+  nodeId?: string;
+  name?: string;
+  groups: string[];
+  allowedEmails?: string[];
+}
+
+export interface UserScope {
+  emailPolicy?: string;
+  emailDigest?: string;
+  customAllowFree?: boolean;
+  resourceClass: string;
+  teamId?: string;
+}
+
+export interface RoutingPolicy {
+  version: number;
+  revision: string;
+  pool: string;
+  publicResource: boolean;
+  mediaOnProAction: string;
+  fallbackDefault?: boolean;
+  unlimited?: boolean;
+  pricingGroups?: string[];
+  subPoolTags?: string[];
+  directDomains?: string[];
+  directIps?: string[];
+  mediaDomains?: string[];
+  proWhitelistDomains?: string[];
+}
+
+export interface AgentClient {
+  ID: string;
+  Email: string;
+  Flow: string;
+  expiresAt?: string;
+}
+
+export interface ClientListResponse {
+  agentId?: string;
+  nodeId?: string;
+  enrollmentStatus?: string;
+  scope?: UserScope;
+  routingPolicy?: RoutingPolicy;
+  clients: AgentClient[];
+  total: number;
+  generatedAt: string;
+  revision?: string;
+}
+
+export interface AgentStatusEntry {
+  id: string;
+  name?: string;
+  groups?: string[];
+  healthy: boolean;
+  message?: string;
+  users: number;
+  syncRevision?: string;
+  updatedAt: string;
+  xray: {
+    running: boolean;
+    clients: number;
+    lastSync?: string;
+  };
+}
+
+export interface VlessNode {
+  private?: boolean;
+  name: string;
+  region?: string;
+  pool_count?: number;
+  open_to_users: boolean;
+  address: string;
+  port?: number;
+  users?: string[];
+  transport?: string;
+  path?: string;
+  mode?: string;
+  security?: string;
+  flow?: string;
+  resource_class?: string;
+  routing_pool?: string;
+  pricing_group?: string;
+  sub_pool_tags?: string[];
+  server_name?: string;
+  xhttp_port?: number;
+  tcp_port?: number;
+  uri_scheme_xhttp?: string;
+  uri_scheme_tcp?: string;
+  highSpeedQuotaExhausted?: boolean;
+}
+
+export interface RouteRule {
+  priority: number;
+  name: string;
+  target: string;
+  effective_target: string;
+  media_on_pro_action?: string;
+  domains?: string[];
+  ips?: string[];
+  clash_rules?: string[];
+}
+
 export interface WorkerEnv {
   HYPERDRIVE: Hyperdrive;
   ACCOUNTS_JWKS_URL?: string;
   JWT_ACCESS_SECRET?: string;
+  INTERNAL_SERVICE_TOKEN?: string;
+  AGENT_CREDENTIALS_JSON?: string;
+  XCONNECT_AGENT_CREDENTIALS_JSON?: string;
+  XCONNECT_AGENT_USERS_CACHE_TTL?: string;
+  XCONNECT_AGENT_STATUS_CACHE_TTL?: string;
+  XCONNECT_AGENT_NODES_CACHE_TTL?: string;
+  DUAL_BUCKET_PRO_GATE_ENABLED?: string;
+  PUBLIC_URL?: string;
+  XRAY_XHTTP_PATH?: string;
+  XRAY_XHTTP_MODE?: string;
+  XRAY_XHTTP_PORT?: string;
+  XRAY_TCP_PORT?: string;
   XCONNECT_OVERLAY_REQUIRE_SIGNING_KEY?: string;
   XCONNECT_OVERLAY_SIGNING_KEY_ID?: string;
   XCONNECT_OVERLAY_SIGNING_PRIVATE_KEY?: string;

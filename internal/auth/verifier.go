@@ -63,17 +63,41 @@ func NewGORMUserReader(db *gorm.DB) *GORMUserReader {
 }
 
 func (r *GORMUserReader) LookupUserByID(ctx context.Context, userID string) (*UserInfo, error) {
-	return r.lookup(ctx, "id = ?", strings.TrimSpace(userID))
+	col := r.userIDColumn()
+	return r.lookup(ctx, col+" = ?", strings.TrimSpace(userID))
 }
 
 func (r *GORMUserReader) LookupUserByEmail(ctx context.Context, email string) (*UserInfo, error) {
 	return r.lookup(ctx, "LOWER(email) = LOWER(?)", strings.TrimSpace(email))
 }
 
+func (r *GORMUserReader) userIDColumn() string {
+	if r == nil || r.db == nil {
+		return "id"
+	}
+	if cols, err := r.db.Migrator().ColumnTypes("users"); err == nil {
+		hasID, hasUUID := false, false
+		for _, c := range cols {
+			switch strings.ToLower(c.Name()) {
+			case "id":
+				hasID = true
+			case "uuid":
+				hasUUID = true
+			}
+		}
+		if hasUUID && !hasID {
+			return "uuid"
+		}
+	}
+	return "id"
+}
+
 func (r *GORMUserReader) lookup(ctx context.Context, where string, arg string) (*UserInfo, error) {
 	if r == nil || r.db == nil || arg == "" {
 		return nil, errors.New("user not found")
 	}
+	idCol := r.userIDColumn()
+	selectCols := idCol + " AS id, email, role, active, permissions"
 	var row struct {
 		ID          string `gorm:"column:id"`
 		Email       string `gorm:"column:email"`
@@ -81,7 +105,7 @@ func (r *GORMUserReader) lookup(ctx context.Context, where string, arg string) (
 		Active      bool   `gorm:"column:active"`
 		Permissions string `gorm:"column:permissions"`
 	}
-	if err := r.db.WithContext(ctx).Table("users").Select("id, email, role, active, permissions").Where(where, arg).First(&row).Error; err != nil {
+	if err := r.db.WithContext(ctx).Table("users").Select(selectCols).Where(where, arg).Limit(1).Take(&row).Error; err != nil {
 		return nil, err
 	}
 	info := &UserInfo{
@@ -99,10 +123,25 @@ func (r *GORMUserReader) lookup(ctx context.Context, where string, arg string) (
 		}
 	}
 	if r.db.Migrator().HasTable("account_quota_states") {
+		quotaUserCol := "user_id"
+		if cols, err := r.db.Migrator().ColumnTypes("account_quota_states"); err == nil {
+			hasUserID, hasAccountUUID := false, false
+			for _, c := range cols {
+				switch strings.ToLower(c.Name()) {
+				case "user_id":
+					hasUserID = true
+				case "account_uuid":
+					hasAccountUUID = true
+				}
+			}
+			if hasAccountUUID && !hasUserID {
+				quotaUserCol = "account_uuid"
+			}
+		}
 		var quota struct {
 			SuspendState string `gorm:"column:suspend_state"`
 		}
-		if err := r.db.WithContext(ctx).Table("account_quota_states").Select("suspend_state").Where("user_id = ?", info.ID).First(&quota).Error; err == nil {
+		if err := r.db.WithContext(ctx).Table("account_quota_states").Select("suspend_state").Where(quotaUserCol+" = ?", info.ID).Limit(1).Take(&quota).Error; err == nil {
 			info.Suspended = strings.EqualFold(strings.TrimSpace(quota.SuspendState), "suspended")
 		}
 	}
@@ -338,10 +377,29 @@ func extractBearerOrCookie(c *gin.Context) string {
 	return ""
 }
 
+func extractBearerCookieOrQuery(c *gin.Context) string {
+	if token := extractBearerOrCookie(c); token != "" {
+		return token
+	}
+	if token := strings.TrimSpace(c.Query("token")); token != "" {
+		return token
+	}
+	return ""
+}
+
 // AuthMiddleware verifies JWTs offline (via JWKS or HS256 transition secret) and optionally validates active status via UserReader.
 func (v *Verifier) AuthMiddleware() gin.HandlerFunc {
+	return v.authMiddleware(extractBearerOrCookie)
+}
+
+// AuthMiddlewareAllowQueryToken verifies JWTs from Authorization Bearer, xc_session cookie, or ?token= query parameter.
+func (v *Verifier) AuthMiddlewareAllowQueryToken() gin.HandlerFunc {
+	return v.authMiddleware(extractBearerCookieOrQuery)
+}
+
+func (v *Verifier) authMiddleware(extract func(*gin.Context) string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		token := extractBearerOrCookie(c)
+		token := extract(c)
 		if token == "" {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "missing authorization header"})
 			c.Abort()
@@ -447,6 +505,9 @@ func (v *Verifier) InternalAuthMiddleware() gin.HandlerFunc {
 		}
 		candidate := strings.TrimSpace(c.GetHeader("X-Internal-Service-Token"))
 		if candidate == "" {
+			candidate = strings.TrimSpace(c.GetHeader("X-Service-Token"))
+		}
+		if candidate == "" {
 			if authHeader := c.GetHeader("Authorization"); strings.HasPrefix(authHeader, "Bearer ") {
 				candidate = strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
 			}
@@ -458,4 +519,12 @@ func (v *Verifier) InternalAuthMiddleware() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+// ValidateInternalToken validates an internal service token using constant-time comparison.
+func (v *Verifier) ValidateInternalToken(candidate string) bool {
+	if v == nil || v.internalToken == "" || candidate == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(candidate), []byte(v.internalToken)) == 1
 }

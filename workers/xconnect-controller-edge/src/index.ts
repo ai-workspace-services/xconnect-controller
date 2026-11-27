@@ -1,5 +1,14 @@
 import { Hono, type Context } from "hono";
 import {
+  handleGetAgentStatus,
+  handleGetSubscription,
+  handleListAgentNodes,
+  handleListAgentUsers,
+  handleSyncConfig,
+  handleUsersEventsSSEFallback,
+  type AgentServerDeps,
+} from "./agent_server.ts";
+import {
   buildSigningKeysList,
   computeETag,
   etagMatches,
@@ -58,8 +67,14 @@ async function authenticateUser(c: Context<{ Bindings: WorkerEnv }>): Promise<st
   return userId;
 }
 
-export function createApp() {
+export function createApp(deps: AgentServerDeps = {}) {
   const app = new Hono<{ Bindings: WorkerEnv }>();
+  const agentDeps: AgentServerDeps = {
+    withClient: deps.withClient ?? withPgClient,
+    cacheStore: deps.cacheStore,
+    staticEd25519Keys: deps.staticEd25519Keys,
+    now: deps.now,
+  };
 
   app.onError((err, c) => {
     if (err instanceof OverlayError) {
@@ -222,6 +237,16 @@ export function createApp() {
     c.header("Cache-Control", "no-store");
     return c.json({ gateways }, 200);
   });
+
+  app.get("/api/agent-server/v1/status", (c) => handleGetAgentStatus(c, agentDeps));
+  app.get("/api/agent-server/v1/users", (c) => handleListAgentUsers(c, agentDeps));
+  app.get("/api/agent-server/v1/users/events", (c) => handleUsersEventsSSEFallback(c));
+  app.get("/api/agent-server/v1/nodes", (c) => handleListAgentNodes(c, agentDeps));
+  app.get("/api/agent-server/v1/subscription", (c) => handleGetSubscription(c, agentDeps));
+  app.get("/api/agent/nodes", (c) => handleListAgentNodes(c, agentDeps));
+  app.get("/api/auth/sync/subscription", (c) => handleGetSubscription(c, agentDeps));
+  app.get("/api/auth/sync/subscription/:format", (c) => handleGetSubscription(c, agentDeps));
+  app.get("/api/auth/sync/config", (c) => handleSyncConfig(c, agentDeps));
 
   return app;
 }

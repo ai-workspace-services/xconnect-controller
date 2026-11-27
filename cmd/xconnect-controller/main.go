@@ -18,6 +18,7 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
+	"github.com/ai-workspace-services/xconnect-controller/internal/agentserver"
 	"github.com/ai-workspace-services/xconnect-controller/internal/auth"
 	"github.com/ai-workspace-services/xconnect-controller/internal/httpapi"
 	"github.com/ai-workspace-services/xconnect-controller/internal/observability"
@@ -87,10 +88,29 @@ func main() {
 	verifierCfg.HTTPClient = tracingMgr.WrapHTTPClient(verifierCfg.HTTPClient)
 	verifier := auth.NewVerifier(verifierCfg)
 
+	agentStore := agentserver.NewGORMStore(db)
+	agentCfg, err := agentserver.LoadConfigFromEnv()
+	if err != nil {
+		logger.Error("invalid agent server configuration", "err", err)
+		os.Exit(1)
+	}
+	agentRegistry, err := agentserver.NewRegistry(agentCfg)
+	if err != nil {
+		logger.Error("failed to initialize agent registry", "err", err)
+		os.Exit(1)
+	}
+	agentRegistry.SetStore(agentStore)
+	agentRegistry.SetLogger(logger.With("component", "agent-registry"))
+	if loadErr := agentRegistry.Load(ctx); loadErr != nil {
+		logger.Warn("failed to preload agent registry from store", "err", loadErr)
+	}
+	agentServerSvc := agentserver.NewService(agentStore, agentRegistry, verifier, agentserver.ServiceConfigFromEnv())
+
 	middlewares := []gin.HandlerFunc{tracingMgr.Middleware()}
 
 	router := httpapi.NewRouter(httpapi.Server{
 		Overlay:     overlayService,
+		AgentServer: agentServerSvc,
 		Verifier:    verifier,
 		Middlewares: middlewares,
 		DBHealth: func(probeCtx context.Context) error {

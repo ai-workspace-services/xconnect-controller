@@ -19,6 +19,7 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
+	"github.com/ai-workspace-services/xconnect-controller/internal/agentserver"
 	"github.com/ai-workspace-services/xconnect-controller/internal/auth"
 	"github.com/ai-workspace-services/xconnect-controller/internal/overlay"
 )
@@ -195,5 +196,48 @@ func TestOverlayV1RouteInventoryAndJWKSFlow(t *testing.T) {
 	router.ServeHTTP(keysRec, keysReq)
 	if keysRec.Code != http.StatusOK {
 		t.Fatalf("signing-keys failed: %d %s", keysRec.Code, keysRec.Body.String())
+	}
+}
+
+func TestAgentServerAndSyncRouteInventory(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, err := gorm.Open(sqlite.Open("file:httpapi-agent-routes?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := agentserver.NewRegistry(agentserver.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier := auth.NewVerifier(auth.VerifierConfig{InternalToken: "internal-token"})
+	agentSvc := agentserver.NewService(agentserver.NewGORMStore(db), registry, verifier, agentserver.ServiceConfig{})
+	router := NewRouter(Server{
+		AgentServer: agentSvc,
+		Verifier:    verifier,
+		DBHealth:    func(_ context.Context) error { return nil },
+	})
+
+	actual := make(map[string]bool)
+	for _, rt := range router.Routes() {
+		actual[rt.Method+" "+rt.Path] = true
+	}
+	required := []string{
+		"GET /api/agent-server/v1/status",
+		"POST /api/agent-server/v1/status",
+		"GET /api/agent-server/v1/users",
+		"GET /api/agent-server/v1/users/events",
+		"GET /api/agent-server/v1/nodes",
+		"POST /api/agent-server/v1/nodes/heartbeat",
+		"POST /api/internal/nodes/heartbeat",
+		"GET /api/agent/nodes",
+		"GET /api/auth/sync/subscription",
+		"GET /api/auth/sync/subscription/:format",
+		"GET /api/auth/sync/config",
+		"GET /api/observability/internal/xconnect/identity",
+	}
+	for _, want := range required {
+		if !actual[want] {
+			t.Fatalf("missing required route %q", want)
+		}
 	}
 }
