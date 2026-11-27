@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 
@@ -84,4 +85,9 @@ func OpenPostgres(dsn string) (*sql.DB, error) {
 // GinMiddleware returns a pass-through middleware when compiled with -tags no_apm.
 func GinMiddleware(string, string) gin.HandlerFunc {
 	return func(c *gin.Context) { c.Next() }
+}
+
+// WrapHTTPClient returns the HTTP client unchanged when compiled with -tags no_apm.
+func WrapHTTPClient(_ string, client *http.Client) *http.Client {
+	return client
 }
