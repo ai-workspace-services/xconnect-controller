@@ -12,12 +12,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/ai-workspace-services/xconnect-controller/internal/agentserver"
 	"github.com/ai-workspace-services/xconnect-controller/internal/auth"
 	"github.com/ai-workspace-services/xconnect-controller/internal/overlay"
 )
 
 type Server struct {
 	Overlay     *overlay.Service
+	AgentServer *agentserver.Service
 	Verifier    *auth.Verifier
 	DBHealth    func(context.Context) error
 	Middlewares []gin.HandlerFunc
@@ -53,6 +55,39 @@ func RegisterRoutes(r *gin.Engine, s Server) {
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "ready", "database": "ok"})
 	})
+
+	if s.AgentServer != nil {
+		agentV1 := r.Group("/api/agent-server/v1")
+		agentV1.GET("/status", s.AgentServer.GetAgentStatus)
+		agentV1.POST("/status", s.AgentServer.ReportAgentStatus)
+		agentV1.GET("/users", s.AgentServer.ListAgentUsers)
+		agentV1.GET("/users/events", s.AgentServer.WatchAgentUsers)
+		agentV1.POST("/nodes/heartbeat", s.AgentServer.NodeHeartbeat)
+
+		if s.Verifier != nil {
+			userSyncAuth := s.Verifier.AuthMiddlewareAllowQueryToken()
+			agentV1.GET("/nodes", userSyncAuth, s.AgentServer.ListAgentNodes)
+			agentV1.GET("/subscription", userSyncAuth, s.AgentServer.GetSubscription)
+			agentV1.GET("/regional-pools", userSyncAuth, s.AgentServer.ListRegionalPools)
+
+			r.GET("/api/agent/nodes", userSyncAuth, s.AgentServer.ListAgentNodes)
+
+			syncGroup := r.Group("/api/auth/sync")
+			syncGroup.Use(userSyncAuth)
+			syncGroup.GET("/subscription", s.AgentServer.GetSubscription)
+			syncGroup.GET("/subscription/:format", s.AgentServer.GetSubscription)
+			syncGroup.GET("/config", s.AgentServer.SyncConfigSnapshot)
+
+			internalAgent := r.Group("/api/internal")
+			internalAgent.Use(s.Verifier.InternalAuthMiddleware())
+			internalAgent.POST("/nodes/heartbeat", s.AgentServer.InternalNodeHeartbeat)
+
+			obsInternal := r.Group("/api/observability/internal")
+			obsInternal.Use(s.Verifier.InternalAuthMiddleware())
+			obsInternal.GET("/xconnect/identity", s.AgentServer.ResolveXConnectIdentity)
+			obsInternal.POST("/xconnect/identity", s.AgentServer.ResolveXConnectIdentity)
+		}
+	}
 
 	if s.Overlay == nil {
 		return

@@ -12,6 +12,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 func signTestEdDSA(t *testing.T, kid string, priv ed25519.PrivateKey, userID, email string, roles []string) string {
@@ -128,5 +130,45 @@ func TestOfflineJWKSAndHS256Verification(t *testing.T) {
 	r.ServeHTTP(recOK, reqOK)
 	if recOK.Code != http.StatusOK {
 		t.Fatalf("expected 200 for valid internal token, got %d", recOK.Code)
+	}
+
+	recSvcOK := httptest.NewRecorder()
+	reqSvcOK := httptest.NewRequest(http.MethodPost, "/internal", nil)
+	reqSvcOK.Header.Set("X-Service-Token", "internal-secret-token")
+	r.ServeHTTP(recSvcOK, reqSvcOK)
+	if recSvcOK.Code != http.StatusOK {
+		t.Fatalf("expected 200 for X-Service-Token, got %d", recSvcOK.Code)
+	}
+}
+
+func TestGORMUserReaderAccountsUUIDSchema(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:auth-uuid-schema?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`
+		CREATE TABLE users (
+			uuid TEXT PRIMARY KEY,
+			email TEXT NOT NULL,
+			role TEXT NOT NULL,
+			active INTEGER NOT NULL,
+			permissions TEXT NOT NULL DEFAULT '[]'
+		);
+		CREATE TABLE account_quota_states (
+			account_uuid TEXT PRIMARY KEY,
+			suspend_state TEXT NOT NULL DEFAULT 'active'
+		);
+		INSERT INTO users (uuid, email, role, active, permissions) VALUES ('usr-uuid-1', 'u1@example.test', 'admin', 1, '["*"]');
+		INSERT INTO account_quota_states (account_uuid, suspend_state) VALUES ('usr-uuid-1', 'suspended');
+	`).Error; err != nil {
+		t.Fatal(err)
+	}
+	reader := NewGORMUserReader(db)
+	info, err := reader.LookupUserByID(t.Context(), "usr-uuid-1")
+	if err != nil {
+		t.Fatalf("LookupUserByID failed: %v", err)
+	}
+	if info.ID != "usr-uuid-1" || info.Role != "admin" || !info.Suspended {
+		t.Fatalf("unexpected UserInfo: %+v", info)
 	}
 }
