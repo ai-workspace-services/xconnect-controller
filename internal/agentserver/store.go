@@ -310,7 +310,7 @@ type rawUserRow struct {
 
 func (p schemaProbe) userSelectCols() []string {
 	cols := []string{
-		p.userIDCol + " AS id",
+		"CAST(" + p.userIDCol + " AS TEXT) AS id",
 		"COALESCE(email, '') AS email",
 	}
 	if p.userNameCol != "" {
@@ -420,7 +420,8 @@ func (s *GORMStore) GetUserByID(ctx context.Context, id string) (*User, error) {
 	err := s.db.WithContext(ctx).Table("users").
 		Select(p.userSelectCols()).
 		Where("CAST("+p.userIDCol+" AS TEXT) = ?", strings.TrimSpace(id)).
-		First(&row).Error
+		Limit(1).
+		Take(&row).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrUserNotFound
@@ -440,7 +441,8 @@ func (s *GORMStore) GetUserByEmail(ctx context.Context, email string) (*User, er
 	err := s.db.WithContext(ctx).Table("users").
 		Select(p.userSelectCols()).
 		Where("LOWER(email) = LOWER(?)", strings.TrimSpace(email)).
-		First(&row).Error
+		Limit(1).
+		Take(&row).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrUserNotFound
@@ -460,7 +462,8 @@ func (s *GORMStore) GetUserByProxyUUID(ctx context.Context, proxyUUID string) (*
 	err := s.db.WithContext(ctx).Table("users").
 		Select(p.userSelectCols()).
 		Where("LOWER(CAST(proxy_uuid AS TEXT)) = LOWER(?)", strings.TrimSpace(proxyUUID)).
-		First(&row).Error
+		Limit(1).
+		Take(&row).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrUserNotFound
@@ -594,7 +597,8 @@ func (s *GORMStore) GetNetworkMembership(ctx context.Context, userID string) (Ne
 	err := s.db.WithContext(ctx).Table("network_team_members").
 		Select("COALESCE(team_id, '') AS team_id, dedicated_only").
 		Where("CAST("+p.teamMemberUserCol+" AS TEXT) = ?", member.UserID).
-		First(&row).Error
+		Limit(1).
+		Take(&row).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return member, nil
@@ -622,7 +626,8 @@ func (s *GORMStore) GetAccountBillingProfile(ctx context.Context, accountUUID st
 	err := s.db.WithContext(ctx).Table("account_billing_profiles").
 		Select("CAST("+p.billingUserCol+" AS TEXT) AS account_uuid, package_name, included_quota_bytes, high_speed_quota_bytes, base_price_per_byte").
 		Where("CAST("+p.billingUserCol+" AS TEXT) = ?", strings.TrimSpace(accountUUID)).
-		First(&row).Error
+		Limit(1).
+		Take(&row).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrUserNotFound
@@ -658,7 +663,8 @@ func (s *GORMStore) GetAccountQuotaState(ctx context.Context, accountUUID string
 	err := s.db.WithContext(ctx).Table("account_quota_states").
 		Select("CAST("+p.quotaUserCol+" AS TEXT) AS account_uuid, remaining_included_quota, remaining_high_speed_quota, current_balance, arrears, throttle_state, suspend_state, proxy_access_state, period_start, period_end").
 		Where("CAST("+p.quotaUserCol+" AS TEXT) = ?", strings.TrimSpace(accountUUID)).
-		First(&row).Error
+		Limit(1).
+		Take(&row).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrUserNotFound
@@ -751,7 +757,8 @@ func (s *GORMStore) RegisterTeamAgent(ctx context.Context, agentID, suggestedTea
 	if err := s.db.WithContext(ctx).Table("team_agent_enrollments").
 		Select("agent_id, suggested_team_id, assigned_team_id, status, decided_by, reason, updated_at").
 		Where("agent_id = ?", agentID).
-		First(&out).Error; err != nil {
+		Limit(1).
+		Take(&out).Error; err != nil {
 		return TeamAgentEnrollment{}, err
 	}
 	return TeamAgentEnrollment{

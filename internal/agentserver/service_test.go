@@ -762,6 +762,21 @@ func TestGORMStoreAccountsSchemaAndGracefulOptionalTables(t *testing.T) {
 	if err != nil || len(users) != 1 || users[0].ID != "usr-100" || users[0].ProxyUUID != "proxy-uuid-100" {
 		t.Fatalf("ListUsers unexpected: users=%+v err=%v", users, err)
 	}
+	byID, err := st.GetUserByID(ctx, "usr-100")
+	if err != nil || byID.ID != "usr-100" || byID.Email != "bob@example.test" || byID.ProxyUUID != "proxy-uuid-100" {
+		t.Fatalf("GetUserByID on uuid-only users table failed: user=%+v err=%v", byID, err)
+	}
+	byEmail, err := st.GetUserByEmail(ctx, "BOB@example.test")
+	if err != nil || byEmail.ID != "usr-100" {
+		t.Fatalf("GetUserByEmail on uuid-only users table failed: user=%+v err=%v", byEmail, err)
+	}
+	byProxy, err := st.GetUserByProxyUUID(ctx, "PROXY-UUID-100")
+	if err != nil || byProxy.ID != "usr-100" {
+		t.Fatalf("GetUserByProxyUUID on uuid-only users table failed: user=%+v err=%v", byProxy, err)
+	}
+	if _, err := st.GetUserByID(ctx, "does-not-exist"); err != agentserver.ErrUserNotFound {
+		t.Fatalf("expected ErrUserNotFound for unknown user, got %v", err)
+	}
 	if err := st.UpsertNodeHealthSnapshot(ctx, &agentserver.NodeHealthSnapshot{
 		NodeID: "jp-xconnect-01.svc.plus", Region: "jp", PricingGroup: "free", Healthy: true, SampledAt: time.Now().UTC(),
 	}); err != nil {
