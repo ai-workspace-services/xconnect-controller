@@ -26,3 +26,13 @@ npx wrangler secret put JWT_ACCESS_SECRET
 # 3. Deploy edge worker
 npm run deploy
 ```
+
+## Automated Post-Merge CI/CD Deployment (Vault KV)
+
+On every push/merge to `main` (and `workflow_dispatch`), the final `deploy-worker` job in `../../.github/workflows/ci.yml` runs after `test`, `worker-ts`, and `container` pass:
+
+1. Authenticates to `https://vault.svc.plus` via GitHub OIDC (`role: github-actions-xconnect-controller-prod`) and reads:
+   - Vault KV path: `prod/serverless/cloudflare` (`kv/data/prod/serverless/cloudflare`)
+   - Keys: `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`
+2. Resolves `CLOUDFLARE_HYPERDRIVE_ID` (from repository variable `CLOUDFLARE_HYPERDRIVE_ID` or an existing `xconnect-overlay-pg` / `xconnect-controller-pg` Hyperdrive config) via `scripts/render-wrangler-config.mjs`.
+3. Runs `npx wrangler deploy --config wrangler.deploy.toml` and verifies `/healthz` returns `runtime: "cloudflare-worker"`.
