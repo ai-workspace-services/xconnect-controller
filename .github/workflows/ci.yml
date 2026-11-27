@@ -124,7 +124,7 @@ jobs:
           WORKER_URL=$(grep -Eo 'https://[A-Za-z0-9._-]+\.workers\.dev' "${DEPLOY_LOG}" | tail -n 1 || true)
           if [ -n "${WORKER_URL}" ]; then
             echo "Verifying ${WORKER_URL}/healthz"
-            curl -fsS --max-time 15 "${WORKER_URL}/healthz" | grep -q '"runtime":"cloudflare-worker"'
+            curl -fsS --retry 6 --retry-delay 3 --retry-all-errors --max-time 15 "${WORKER_URL}/healthz" | grep -q '"runtime":"cloudflare-worker"'
           fi
       - name: Cleanup generated wrangler.deploy.toml
         if: always()
