@@ -76,7 +76,9 @@ func main() {
 	if db.Migrator().HasTable("users") {
 		userReader = auth.NewGORMUserReader(db)
 	}
-	verifier := auth.NewVerifier(auth.VerifierConfigFromEnv(userReader))
+	verifierCfg := auth.VerifierConfigFromEnv(userReader)
+	verifierCfg.HTTPClient = observability.WrapHTTPClient(tracingProvider, verifierCfg.HTTPClient)
+	verifier := auth.NewVerifier(verifierCfg)
 
 	var middlewares []gin.HandlerFunc
 	if tracingProvider != observability.ProviderNone {
@@ -112,7 +114,7 @@ func main() {
 	}
 
 	go func() {
-		logger.Info("xconnect-controller listening", "addr", addr, "schema_managed", overlayCfg.SchemaManaged)
+		logger.Info("xconnect-controller listening", "addr", addr, "schema_managed", overlayCfg.SchemaManaged, "tracing_provider", tracingProvider)
 		if serveErr := srv.ListenAndServe(); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 			logger.Error("http server error", "err", serveErr)
 			stop()
