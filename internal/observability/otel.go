@@ -21,25 +21,30 @@ import (
 
 // Configure enables OTLP tracing only when an endpoint is configured.
 func Configure(ctx context.Context, defaultService string) (func(context.Context) error, error) {
-	endpoint := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"))
-	if endpoint == "" || strings.EqualFold(os.Getenv("OTEL_SDK_DISABLED"), "true") {
+	return ConfigureWithConfig(ctx, defaultService, LoadTracingConfig())
+}
+
+// ConfigureWithConfig initializes OTLP tracing and W3C propagation from TracingConfig.
+func ConfigureWithConfig(ctx context.Context, defaultService string, cfg TracingConfig) (func(context.Context) error, error) {
+	endpoint := strings.TrimSpace(cfg.OTelTracesEndpoint)
+	if endpoint == "" || cfg.OTelSDKDisabled {
 		return func(context.Context) error { return nil }, nil
 	}
 
 	ratio := 0.05
-	if raw := strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER_ARG")); raw != "" {
+	if raw := strings.TrimSpace(cfg.OTelSamplerArg); raw != "" {
 		parsed, err := strconv.ParseFloat(raw, 64)
 		if err != nil || parsed < 0 || parsed > 1 {
 			return nil, fmt.Errorf("invalid OTEL_TRACES_SAMPLER_ARG %q", raw)
 		}
 		ratio = parsed
 	}
-	serviceName := strings.TrimSpace(os.Getenv("OTEL_SERVICE_NAME"))
+	serviceName := strings.TrimSpace(cfg.OTelServiceName)
 	if serviceName == "" {
 		serviceName = defaultService
 	}
 	environment := firstNonEmpty(
-		os.Getenv("OTEL_ENVIRONMENT"),
+		cfg.OTelEnvironment,
 		os.Getenv("DEPLOY_ENV"),
 		os.Getenv("RUNTIME_ENV"),
 		os.Getenv("ENVIRONMENT"),
@@ -54,7 +59,7 @@ func Configure(ctx context.Context, defaultService string) (func(context.Context
 
 	var exporter sdktrace.SpanExporter
 	var err error
-	if strings.EqualFold(os.Getenv("OTEL_EXPORTER_OTLP_PROTOCOL"), "grpc") {
+	if strings.EqualFold(cfg.OTelProtocol, "grpc") {
 		exporter, err = otlptracegrpc.New(ctx, otlptracegrpc.WithEndpointURL(endpoint))
 	} else {
 		exporter, err = otlptracehttp.New(ctx, otlptracehttp.WithEndpointURL(endpoint))
@@ -82,15 +87,6 @@ func Configure(ctx context.Context, defaultService string) (func(context.Context
 	return provider.Shutdown, nil
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if trimmed := strings.TrimSpace(value); trimmed != "" {
-			return trimmed
-		}
-	}
-	return "unknown"
-}
-
 // TraceLogAttrs returns stable correlation fields for structured request logs.
 func TraceLogAttrs(ctx context.Context) []any {
 	spanContext := trace.SpanContextFromContext(ctx)
@@ -102,11 +98,4 @@ func TraceLogAttrs(ctx context.Context) []any {
 		"trace_id", spanContext.TraceID().String(),
 		"span_id", spanContext.SpanID().String(),
 	)
-}
-
-func RuntimeLogAttrs(defaultService string) []any {
-	serviceName := firstNonEmpty(os.Getenv("DD_SERVICE"), os.Getenv("OTEL_SERVICE_NAME"), defaultService)
-	environment := firstNonEmpty(os.Getenv("DD_ENV"), os.Getenv("OTEL_ENVIRONMENT"), os.Getenv("DEPLOY_ENV"), os.Getenv("RUNTIME_ENV"), os.Getenv("ENVIRONMENT"))
-	instance := firstNonEmpty(os.Getenv("OTEL_SERVICE_INSTANCE_ID"), os.Getenv("INSTANCE"), os.Getenv("HOSTNAME"), serviceName)
-	return []any{"service.name", serviceName, "service_name", serviceName, "environment", environment, "instance", instance}
 }

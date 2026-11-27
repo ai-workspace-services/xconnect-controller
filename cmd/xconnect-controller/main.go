@@ -33,17 +33,24 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	stopTracing, tracingProvider, traceErr := observability.ConfigureTracing(ctx, "web-saas-xconnect-controller")
+	tracingMgr, traceErr := observability.NewTracingManager(ctx, "web-saas-xconnect-controller")
 	if traceErr != nil {
 		logger.Warn("tracing disabled", "err", traceErr)
 	}
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := stopTracing(shutdownCtx); err != nil {
+		if err := tracingMgr.Shutdown(shutdownCtx); err != nil {
 			logger.Warn("tracing shutdown failed", "err", err)
 		}
 	}()
+	tracingMgr.StartWatcher(ctx, 5*time.Second, func(provider string, reloadErr error) {
+		if reloadErr != nil {
+			logger.Warn("tracing reload error", "tracing_provider", provider, "err", reloadErr)
+			return
+		}
+		logger.Info("tracing configuration reloaded", "tracing_provider", provider)
+	})
 
 	db, err := openDatabase()
 	if err != nil {
@@ -77,13 +84,10 @@ func main() {
 		userReader = auth.NewGORMUserReader(db)
 	}
 	verifierCfg := auth.VerifierConfigFromEnv(userReader)
-	verifierCfg.HTTPClient = observability.WrapHTTPClient(tracingProvider, verifierCfg.HTTPClient)
+	verifierCfg.HTTPClient = tracingMgr.WrapHTTPClient(verifierCfg.HTTPClient)
 	verifier := auth.NewVerifier(verifierCfg)
 
-	var middlewares []gin.HandlerFunc
-	if tracingProvider != observability.ProviderNone {
-		middlewares = append(middlewares, observability.GinMiddleware(tracingProvider, "web-saas-xconnect-controller"))
-	}
+	middlewares := []gin.HandlerFunc{tracingMgr.Middleware()}
 
 	router := httpapi.NewRouter(httpapi.Server{
 		Overlay:     overlayService,
@@ -114,7 +118,7 @@ func main() {
 	}
 
 	go func() {
-		logger.Info("xconnect-controller listening", "addr", addr, "schema_managed", overlayCfg.SchemaManaged, "tracing_provider", tracingProvider)
+		logger.Info("xconnect-controller listening", "addr", addr, "schema_managed", overlayCfg.SchemaManaged, "tracing_provider", tracingMgr.Provider())
 		if serveErr := srv.ListenAndServe(); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 			logger.Error("http server error", "err", serveErr)
 			stop()

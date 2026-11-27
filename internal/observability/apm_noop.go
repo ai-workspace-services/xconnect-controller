@@ -5,52 +5,25 @@ package observability
 import (
 	"context"
 	"database/sql"
-	"net"
 	"net/http"
-	"os"
-	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
-
-const (
-	ProviderNone    = "none"
-	ProviderOTel    = "otel"
-	ProviderDDTrace = "ddtrace"
-)
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if trimmed := strings.TrimSpace(value); trimmed != "" {
-			return trimmed
-		}
-	}
-	return "unknown"
-}
 
 // ResolveTracingProvider always returns ProviderNone when compiled with -tags no_apm.
 func ResolveTracingProvider() string {
 	return ProviderNone
 }
 
-// DDTraceServiceName resolves the service name from environment or default.
-func DDTraceServiceName(defaultService string) string {
-	return firstNonEmpty(os.Getenv("DD_SERVICE"), os.Getenv("OTEL_SERVICE_NAME"), defaultService)
-}
-
-// DDTraceAgentAddr builds host:port for DataKit DDTrace ingestion.
-func DDTraceAgentAddr() string {
-	host := firstNonEmpty(os.Getenv("DD_AGENT_HOST"), "datakit-service.datakit.svc")
-	port := strings.TrimSpace(os.Getenv("DD_TRACE_AGENT_PORT"))
-	if port == "" {
-		port = "9529"
-	}
-	return net.JoinHostPort(host, port)
-}
-
 // Configure is a no-op when compiled with -tags no_apm.
 func Configure(context.Context, string) (func(context.Context) error, error) {
+	return func(context.Context) error { return nil }, nil
+}
+
+// ConfigureWithConfig is a no-op when compiled with -tags no_apm.
+func ConfigureWithConfig(context.Context, string, TracingConfig) (func(context.Context) error, error) {
 	return func(context.Context) error { return nil }, nil
 }
 
@@ -62,14 +35,6 @@ func ConfigureTracing(context.Context, string) (func(context.Context) error, str
 // TraceLogAttrs returns runtime log attributes when compiled with -tags no_apm.
 func TraceLogAttrs(context.Context) []any {
 	return RuntimeLogAttrs("web-saas-xconnect-controller")
-}
-
-// RuntimeLogAttrs returns structured log identity attributes.
-func RuntimeLogAttrs(defaultService string) []any {
-	serviceName := firstNonEmpty(os.Getenv("DD_SERVICE"), os.Getenv("OTEL_SERVICE_NAME"), defaultService)
-	environment := firstNonEmpty(os.Getenv("DD_ENV"), os.Getenv("OTEL_ENVIRONMENT"), os.Getenv("DEPLOY_ENV"), os.Getenv("RUNTIME_ENV"), os.Getenv("ENVIRONMENT"))
-	instance := firstNonEmpty(os.Getenv("OTEL_SERVICE_INSTANCE_ID"), os.Getenv("INSTANCE"), os.Getenv("HOSTNAME"), serviceName)
-	return []any{"service.name", serviceName, "service_name", serviceName, "environment", environment, "instance", instance}
 }
 
 // DDTraceSpanAttrs returns nil when compiled with -tags no_apm.
@@ -91,3 +56,35 @@ func GinMiddleware(string, string) gin.HandlerFunc {
 func WrapHTTPClient(_ string, client *http.Client) *http.Client {
 	return client
 }
+
+// TracingManager is a no-op manager when compiled with -tags no_apm.
+type TracingManager struct{}
+
+// NewTracingManager returns a no-op TracingManager when compiled with -tags no_apm.
+func NewTracingManager(context.Context, string) (*TracingManager, error) {
+	return &TracingManager{}, nil
+}
+
+// Provider always returns ProviderNone when compiled with -tags no_apm.
+func (*TracingManager) Provider() string { return ProviderNone }
+
+// Reload is a no-op when compiled with -tags no_apm.
+func (*TracingManager) Reload(context.Context) (bool, string, error) {
+	return false, ProviderNone, nil
+}
+
+// Middleware returns a pass-through handler when compiled with -tags no_apm.
+func (*TracingManager) Middleware() gin.HandlerFunc {
+	return func(c *gin.Context) { c.Next() }
+}
+
+// WrapHTTPClient returns the HTTP client unchanged when compiled with -tags no_apm.
+func (*TracingManager) WrapHTTPClient(client *http.Client) *http.Client {
+	return client
+}
+
+// StartWatcher is a no-op when compiled with -tags no_apm.
+func (*TracingManager) StartWatcher(context.Context, time.Duration, func(string, error)) {}
+
+// Shutdown is a no-op when compiled with -tags no_apm.
+func (*TracingManager) Shutdown(context.Context) error { return nil }
