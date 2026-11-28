@@ -237,6 +237,9 @@ func effectiveAgentResourceClass(access networkAccess, user *User, packageName s
 	if group == MonthlyPlusQuotaLimitGroup || group == MonthlyUnlimitedBetaQuotaGroup {
 		return agentResourcePlus
 	}
+	if isWhitelistFreeMember(user) || strings.EqualFold(strings.TrimSpace(packageName), "whitelist") {
+		return agentResourcePlus
+	}
 	return agentResourceFree
 }
 

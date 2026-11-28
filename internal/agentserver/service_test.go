@@ -797,3 +797,126 @@ func TestGORMStoreAccountsSchemaAndGracefulOptionalTables(t *testing.T) {
 		t.Fatalf("expected ErrUserNotFound for missing billing table, got %v", err)
 	}
 }
+
+func TestWhitelistFreeUserAccessesMediaPoolPlusNodes(t *testing.T) {
+	h := newTestHarness(t, 0)
+	h.store.users = []agentserver.User{
+		{
+			ID:            "edfd5179-f9e7-40ba-89d0-d8a957b6cd7a",
+			Name:          "Nora",
+			Email:         "624220860@qq.com",
+			Role:          "user",
+			Active:        true,
+			EmailVerified: true,
+			ProxyUUID:     "uuid-whitelist-624",
+			Groups:        []string{agentserver.WhitelistFreeQuotaGroup, "User"},
+			UpdatedAt:     h.now,
+		},
+		{
+			ID:            "u-free-regular",
+			Name:          "free",
+			Email:         "free@example.test",
+			Role:          "user",
+			Active:        true,
+			EmailVerified: true,
+			ProxyUUID:     "uuid-regular-free",
+			Groups:        []string{agentserver.MonthlyFreeQuotaLimitGroup, "User"},
+			UpdatedAt:     h.now,
+		},
+	}
+	h.store.billing["edfd5179-f9e7-40ba-89d0-d8a957b6cd7a"] = &agentserver.AccountBillingProfile{
+		AccountUUID:        "edfd5179-f9e7-40ba-89d0-d8a957b6cd7a",
+		PackageName:        "whitelist",
+		IncludedQuotaBytes: 5 << 30,
+	}
+	h.store.quotas["edfd5179-f9e7-40ba-89d0-d8a957b6cd7a"] = &agentserver.AccountQuotaState{
+		AccountUUID:            "edfd5179-f9e7-40ba-89d0-d8a957b6cd7a",
+		RemainingIncludedQuota: 5 << 30,
+		SuspendState:           "active",
+		ProxyAccessState:       "active",
+	}
+	hbNow := h.now
+	h.store.agents = []*agentserver.AgentRecord{
+		{
+			ID:            "jp-plus-01.svc.plus",
+			Name:          "jp-plus-01.svc.plus",
+			Groups:        []string{"internal", "resource:plus"},
+			Healthy:       true,
+			LastHeartbeat: &hbNow,
+			UpdatedAt:     hbNow,
+		},
+		{
+			ID:            "us-custom-01.svc.plus",
+			Name:          "us-custom-01.svc.plus",
+			Groups:        []string{"internal", "resource:custom", "custom:allow-free"},
+			Healthy:       true,
+			LastHeartbeat: &hbNow,
+			UpdatedAt:     hbNow,
+		},
+		{
+			ID:            "jp-pro-01.svc.plus",
+			Name:          "jp-pro-01.svc.plus",
+			Groups:        []string{"internal", "resource:pro"},
+			Healthy:       true,
+			LastHeartbeat: &hbNow,
+			UpdatedAt:     hbNow,
+		},
+	}
+	h.store.healthSnaps = []agentserver.NodeHealthSnapshot{
+		{NodeID: "jp-plus-01.svc.plus", Region: "jp", PricingGroup: "plus", Healthy: true, SampledAt: h.now},
+		{NodeID: "us-custom-01.svc.plus", Region: "us", PricingGroup: "custom", Healthy: true, SampledAt: h.now},
+		{NodeID: "jp-pro-01.svc.plus", Region: "jp", PricingGroup: "pro", Healthy: true, SampledAt: h.now},
+	}
+
+	// Whitelist free user sees Media-Pool (resource:plus) node, not Pro or un-allowlisted Custom.
+	whitelistJWT := signJWT(t, "accounts-jwt-test", h.jwtPriv, "edfd5179-f9e7-40ba-89d0-d8a957b6cd7a", "624220860@qq.com", []string{"user"})
+	req := httptest.NewRequest(http.MethodGet, "/api/agent-server/v1/nodes", nil)
+	req.Header.Set("Authorization", "Bearer "+whitelistJWT)
+	rec := httptest.NewRecorder()
+	h.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("whitelist GET /nodes got %d: %s", rec.Code, rec.Body.String())
+	}
+	var wlNodes []agentserver.VlessNode
+	if err := json.Unmarshal(rec.Body.Bytes(), &wlNodes); err != nil {
+		t.Fatal(err)
+	}
+	if len(wlNodes) != 1 || wlNodes[0].Address != "jp-plus-01.svc.plus" || !wlNodes[0].OpenToUsers || wlNodes[0].RoutingPool != agentserver.RoutingPoolMediaPriority {
+		t.Fatalf("whitelist nodes unexpected: %+v", wlNodes)
+	}
+
+	// Regular non-whitelist free user still resolves to free and does not see resource:plus nodes.
+	freeJWT := signJWT(t, "accounts-jwt-test", h.jwtPriv, "u-free-regular", "free@example.test", []string{"user"})
+	freeReq := httptest.NewRequest(http.MethodGet, "/api/agent-server/v1/nodes", nil)
+	freeReq.Header.Set("Authorization", "Bearer "+freeJWT)
+	freeRec := httptest.NewRecorder()
+	h.router.ServeHTTP(freeRec, freeReq)
+	if freeRec.Code != http.StatusOK {
+		t.Fatalf("regular free GET /nodes got %d: %s", freeRec.Code, freeRec.Body.String())
+	}
+	var freeNodes []agentserver.VlessNode
+	if err := json.Unmarshal(freeRec.Body.Bytes(), &freeNodes); err != nil {
+		t.Fatal(err)
+	}
+	if len(freeNodes) != 0 {
+		t.Fatalf("regular free user unexpectedly received non-free nodes: %+v", freeNodes)
+	}
+
+	// Proxy client sync on a resource:plus agent includes whitelist-free user and excludes regular free user.
+	syncReq := httptest.NewRequest(http.MethodGet, "/api/agent-server/v1/users", nil)
+	syncReq.Header.Set("Authorization", "Bearer agent-wildcard-token")
+	syncReq.Header.Set("X-Agent-ID", "jp-plus-sync-01.svc.plus")
+	syncReq.Header.Set("X-Agent-Resource-Class", "plus")
+	syncRec := httptest.NewRecorder()
+	h.router.ServeHTTP(syncRec, syncReq)
+	if syncRec.Code != http.StatusOK {
+		t.Fatalf("plus agent GET /users got %d: %s", syncRec.Code, syncRec.Body.String())
+	}
+	var syncPayload agentproto.ClientListResponse
+	if err := json.Unmarshal(syncRec.Body.Bytes(), &syncPayload); err != nil {
+		t.Fatal(err)
+	}
+	if len(syncPayload.Clients) != 1 || syncPayload.Clients[0].Email != "624220860@qq.com" {
+		t.Fatalf("plus agent clients unexpected: %+v", syncPayload.Clients)
+	}
+}

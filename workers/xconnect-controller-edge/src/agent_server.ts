@@ -870,6 +870,7 @@ function effectiveAgentResourceClass(access: NetworkAccess, user: UserRow, packa
     return "pro";
   }
   if (group === MONTHLY_PLUS_GROUP || group === MONTHLY_UNLIMITED_GROUP) return "plus";
+  if (isWhitelistFreeMember(user) || packageName.trim().toLowerCase() === "whitelist") return "plus";
   return "free";
 }
 

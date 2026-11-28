@@ -352,3 +352,140 @@ test("Worker Form B: status, users, nodes, and subscription use Cache API, ETag/
   assert.equal(syncJson.routes.length, 4);
   assert.equal(syncJson.nodes.length, 2);
 });
+
+test("Worker Form B: whitelist-free user accesses Media-Pool resource:plus nodes and stays excluded from Pro/Custom", async () => {
+  const now = new Date("2026-11-28T01:00:00Z");
+  const wlUserId = "edfd5179-f9e7-40ba-89d0-d8a957b6cd7a";
+  const state: MockDBState = {
+    users: [
+      {
+        id: wlUserId,
+        name: "Nora",
+        email: "624220860@qq.com",
+        role: "user",
+        groups: ["segment:whitelist:free", "User"],
+        email_verified: true,
+        active: true,
+        proxy_uuid: "aaaaaaaa-5d63-4b99-9c3a-9dfeb6d57da2",
+        created_at: now.toISOString(),
+        updated_at: now.toISOString(),
+      },
+      {
+        id: "u-free-regular",
+        name: "regular-free",
+        email: "free@example.test",
+        role: "user",
+        groups: ["segment:quota:free-3gb", "User"],
+        email_verified: true,
+        active: true,
+        proxy_uuid: "bbbbbbbb-5d63-4b99-9c3a-9dfeb6d57da2",
+        created_at: now.toISOString(),
+        updated_at: now.toISOString(),
+      },
+    ],
+    agents: [
+      {
+        id: "jp-xconnect-01.svc.plus",
+        name: "jp-xconnect-01.svc.plus",
+        groups: ["internal", "resource:plus"],
+        healthy: true,
+        last_heartbeat: now.toISOString(),
+        clients_count: 16,
+        sync_revision: "rev-plus",
+        updated_at: now.toISOString(),
+      },
+      {
+        id: "us-xconnect.svc.plus",
+        name: "us-xconnect.svc.plus",
+        groups: ["internal", "resource:custom", "custom:allow-free"],
+        healthy: true,
+        last_heartbeat: now.toISOString(),
+        clients_count: 2,
+        sync_revision: "rev-custom",
+        updated_at: now.toISOString(),
+      },
+      {
+        id: "jp-xconnect-pro-01.svc.plus",
+        name: "jp-xconnect-pro-01.svc.plus",
+        groups: ["internal", "resource:pro"],
+        healthy: true,
+        last_heartbeat: now.toISOString(),
+        clients_count: 5,
+        sync_revision: "rev-pro",
+        updated_at: now.toISOString(),
+      },
+    ],
+    healthSnapshots: [
+      { node_id: "jp-xconnect-01.svc.plus", region: "jp", pricing_group: "plus", healthy: true, sampled_at: now.toISOString() },
+      { node_id: "us-xconnect.svc.plus", region: "us", pricing_group: "custom", healthy: true, sampled_at: now.toISOString() },
+      { node_id: "jp-xconnect-pro-01.svc.plus", region: "jp", pricing_group: "pro", healthy: true, sampled_at: now.toISOString() },
+    ],
+    billingProfiles: [
+      {
+        account_uuid: wlUserId,
+        package_name: "whitelist",
+        included_quota_bytes: 5 * 1024 ** 3,
+        high_speed_quota_bytes: 0,
+      },
+    ],
+    quotaStates: [
+      {
+        account_uuid: wlUserId,
+        remaining_included_quota: 5 * 1024 ** 3,
+        remaining_high_speed_quota: 0,
+        arrears: false,
+        throttle_state: "normal",
+        suspend_state: "active",
+        proxy_access_state: "active",
+      },
+    ],
+    blacklist: [],
+    teams: [],
+    memberships: [],
+    enrollments: [],
+    queries: [],
+  };
+
+  const { token: wlJWT, staticKeys } = await makeEdDSAUserJWT(wlUserId, "624220860@qq.com", ["user"]);
+  const { token: freeJWT } = await makeEdDSAUserJWT("u-free-regular", "free@example.test", ["user"]);
+  const mockPg = createMockPg(state);
+
+  const app = createApp({
+    withClient: async (_env, fn) => fn(mockPg as never),
+    staticEd25519Keys: staticKeys,
+    now: () => now,
+  });
+
+  const env = {
+    HYPERDRIVE: { connectionString: "postgres://mock" },
+    XCONNECT_AGENT_CREDENTIALS_JSON: JSON.stringify([
+      { id: "jp-xconnect-01.svc.plus", name: "JP Plus", token: "agent-plus-tok", groups: ["resource:plus"] },
+      { id: "us-xconnect.svc.plus", name: "US Custom", token: "agent-custom-tok", nodeId: "us-custom-01", groups: ["resource:custom", "custom:allow-free"], allowedEmails: ["vip@example.test"] },
+    ]),
+  } as unknown as WorkerEnv;
+
+  const wlNodesResp = await app.request("/api/agent-server/v1/nodes", { headers: { Authorization: `Bearer ${wlJWT}` } }, env);
+  assert.equal(wlNodesResp.status, 200);
+  const wlNodes = (await wlNodesResp.json()) as { address: string; open_to_users: boolean; routing_pool: string }[];
+  assert.equal(wlNodes.length, 1);
+  assert.equal(wlNodes[0].address, "jp-xconnect-01.svc.plus");
+  assert.equal(wlNodes[0].open_to_users, true);
+  assert.equal(wlNodes[0].routing_pool, "Media-Pool");
+
+  const freeNodesResp = await app.request("/api/agent-server/v1/nodes", { headers: { Authorization: `Bearer ${freeJWT}` } }, env);
+  assert.equal(freeNodesResp.status, 200);
+  const freeNodes = (await freeNodesResp.json()) as unknown[];
+  assert.equal(freeNodes.length, 0);
+
+  const plusUsersResp = await app.request(
+    "/api/agent-server/v1/users",
+    { headers: { Authorization: "Bearer agent-plus-tok" } },
+    env,
+  );
+  assert.equal(plusUsersResp.status, 200);
+  const plusUsers = (await plusUsersResp.json()) as { clients: { Email: string }[] };
+  assert.deepEqual(
+    plusUsers.clients.map((c) => c.Email),
+    ["624220860@qq.com"],
+  );
+});
