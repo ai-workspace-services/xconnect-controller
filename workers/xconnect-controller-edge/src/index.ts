@@ -1,5 +1,6 @@
-import { Hono, type Context } from "hono";
+import { Hono } from "hono";
 import {
+  authenticateAgentServerUser,
   handleGetAgentStatus,
   handleGetSubscription,
   handleListAgentNodes,
@@ -28,7 +29,6 @@ import {
   serviceOptionsFromEnv,
   withPgClient,
 } from "./db.ts";
-import { extractUserId, verifyJWT } from "./jwks.ts";
 import {
   GATEWAY_SIGNED_CONFIG_V2_MEDIA_TYPE,
   POLICY_MEDIA_TYPE,
@@ -49,22 +49,6 @@ function parseSchemeToken(header: string | undefined, scheme: string): string | 
 
 async function requireSigningContext(env: WorkerEnv): Promise<SigningContext> {
   return loadSigningContext(env);
-}
-
-async function authenticateUser(c: Context<{ Bindings: WorkerEnv }>): Promise<string> {
-  const token = parseSchemeToken(c.req.header("Authorization"), "Bearer");
-  if (!token) {
-    throw new OverlayError(401, "unauthorized", "user authentication required");
-  }
-  const claims = await verifyJWT(token, {
-    jwksUrl: (c.env.ACCOUNTS_JWKS_URL ?? "").trim() || undefined,
-    hs256Secret: (c.env.JWT_ACCESS_SECRET ?? "").trim() || undefined,
-  });
-  const userId = extractUserId(claims);
-  if (!userId) {
-    throw new OverlayError(401, "unauthorized", "user authentication required");
-  }
-  return userId;
 }
 
 export function createApp(deps: AgentServerDeps = {}) {
@@ -218,7 +202,7 @@ export function createApp(deps: AgentServerDeps = {}) {
   });
 
   app.get("/api/overlay/v1/signing-keys", async (c) => {
-    await authenticateUser(c);
+    await authenticateAgentServerUser(c, agentDeps);
     const signingCtx = await requireSigningContext(c.env);
     const payload = JSON.stringify({ keys: buildSigningKeysList(signingCtx) });
     const etag = await computeETag(payload);
@@ -232,8 +216,8 @@ export function createApp(deps: AgentServerDeps = {}) {
   });
 
   app.get("/api/overlay/v1/gateways", async (c) => {
-    const userId = await authenticateUser(c);
-    const gateways = await withPgClient(c.env, (client) => listUserGateways(client, userId));
+    const userId = await authenticateAgentServerUser(c, agentDeps);
+    const gateways = await agentDeps.withClient!(c.env, (client) => listUserGateways(client as never, userId));
     c.header("Cache-Control", "no-store");
     return c.json({ gateways }, 200);
   });

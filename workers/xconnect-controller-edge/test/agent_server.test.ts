@@ -30,6 +30,7 @@ interface MockDBState {
   teams: Record<string, unknown>[];
   memberships: Record<string, unknown>[];
   enrollments: Record<string, unknown>[];
+  sessions?: Record<string, unknown>[];
   queries: string[];
 }
 
@@ -39,6 +40,10 @@ function createMockPg(state: MockDBState): PgQueryExecutor {
       state.queries.push(sql);
       if (/^\s*(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)/i.test(sql)) {
         throw new Error(`read-only worker attempted write SQL: ${sql}`);
+      }
+      if (sql.includes("FROM sessions")) {
+        const tok = String(params[0] ?? "");
+        return { rows: (state.sessions ?? []).filter((s) => s.token === tok) as T[] };
       }
       if (sql.includes("FROM users")) {
         if (sql.includes("WHERE uuid::text = $1")) {
@@ -488,4 +493,148 @@ test("Worker Form B: whitelist-free user accesses Media-Pool resource:plus nodes
     plusUsers.clients.map((c) => c.Email),
     ["624220860@qq.com"],
   );
+});
+
+test("Worker Form B: authenticates opaque public.sessions tokens via Bearer and xc_session cookie", async () => {
+  const now = new Date("2026-11-28T09:00:00Z");
+  const activeUserId = "a55a9f3a-5d63-4b99-9c3a-9dfeb6d57da2";
+  const suspendedUserId = "b66b9f3a-5d63-4b99-9c3a-9dfeb6d57da3";
+  const state: MockDBState = {
+    users: [
+      {
+        id: activeUserId,
+        name: "desktop-user",
+        email: "156405189@qq.com",
+        role: "user",
+        groups: ["segment:whitelist:free", "User"],
+        email_verified: true,
+        active: true,
+        proxy_uuid: activeUserId,
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-11-28T00:00:00Z",
+      },
+      {
+        id: suspendedUserId,
+        name: "suspended-user",
+        email: "suspended@example.test",
+        role: "user",
+        groups: [],
+        email_verified: true,
+        active: false,
+        proxy_uuid: suspendedUserId,
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-11-28T00:00:00Z",
+      },
+    ],
+    agents: [
+      {
+        id: "jp-xconnect-01.svc.plus",
+        name: "jp-xconnect-01.svc.plus",
+        groups: ["internal", "resource:plus"],
+        healthy: true,
+        last_heartbeat: "2026-11-28T08:59:55Z",
+        clients_count: 1,
+        sync_revision: "rev-opaque",
+        updated_at: "2026-11-28T08:59:55Z",
+      },
+    ],
+    healthSnapshots: [
+      { node_id: "jp-xconnect-01.svc.plus", region: "jp", pricing_group: "plus", healthy: true, sampled_at: now.toISOString() },
+    ],
+    billingProfiles: [
+      {
+        account_uuid: activeUserId,
+        package_name: "whitelist",
+        included_quota_bytes: 30 * 1024 ** 3,
+      },
+    ],
+    quotaStates: [
+      {
+        account_uuid: activeUserId,
+        remaining_included_quota: 30 * 1024 ** 3,
+        remaining_high_speed_quota: 0,
+        arrears: false,
+        throttle_state: "normal",
+        suspend_state: "active",
+        proxy_access_state: "active",
+      },
+    ],
+    blacklist: [],
+    teams: [],
+    memberships: [],
+    enrollments: [],
+    sessions: [
+      {
+        token: "opaque-valid-session-token",
+        user_uuid: activeUserId,
+        expires_at: "2026-11-29T09:00:00Z",
+      },
+      {
+        token: "opaque-expired-session-token",
+        user_uuid: activeUserId,
+        expires_at: "2026-11-28T08:00:00Z",
+      },
+      {
+        token: "opaque-suspended-session-token",
+        user_uuid: suspendedUserId,
+        expires_at: "2026-11-29T09:00:00Z",
+      },
+    ],
+    queries: [],
+  };
+
+  const mockPg = createMockPg(state);
+  const app = createApp({
+    withClient: async (_env, fn) => fn(mockPg as never),
+    now: () => now,
+  });
+  const env = {
+    HYPERDRIVE: { connectionString: "postgres://mock" },
+    XCONNECT_AGENT_CREDENTIALS_JSON: JSON.stringify([
+      { id: "jp-xconnect-01.svc.plus", name: "JP Plus", token: "agent-plus-tok", groups: ["resource:plus"] },
+    ]),
+  } as unknown as WorkerEnv;
+
+  // 1. Desktop client Bearer opaque session token succeeds on /api/agent-server/v1/nodes
+  const bearerResp = await app.request(
+    "/api/agent-server/v1/nodes",
+    { headers: { Authorization: "Bearer opaque-valid-session-token" } },
+    env,
+  );
+  assert.equal(bearerResp.status, 200);
+  const nodes = (await bearerResp.json()) as { address: string }[];
+  assert.equal(nodes.length, 1);
+  assert.equal(nodes[0].address, "jp-xconnect-01.svc.plus");
+
+  // 2. Browser xc_session cookie opaque token succeeds on /api/auth/sync/subscription and /api/overlay/v1/gateways
+  const cookieSubResp = await app.request(
+    "/api/auth/sync/subscription?format=vless",
+    { headers: { Cookie: "xc_session=opaque-valid-session-token" } },
+    env,
+  );
+  assert.equal(cookieSubResp.status, 200);
+  assert.match(await cookieSubResp.text(), /^vless:\/\//);
+
+  const gwResp = await app.request(
+    "/api/overlay/v1/gateways",
+    { headers: { Cookie: "xc_session=opaque-valid-session-token" } },
+    env,
+  );
+  assert.equal(gwResp.status, 200);
+
+  // 3. Expired opaque session token returns 401
+  const expiredResp = await app.request(
+    "/api/agent-server/v1/nodes",
+    { headers: { Authorization: "Bearer opaque-expired-session-token" } },
+    env,
+  );
+  assert.equal(expiredResp.status, 401);
+
+  // 4. Suspended account opaque session token returns 403
+  const suspendedResp = await app.request(
+    "/api/agent-server/v1/nodes",
+    { headers: { Authorization: "Bearer opaque-suspended-session-token" } },
+    env,
+  );
+  assert.equal(suspendedResp.status, 403);
 });

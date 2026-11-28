@@ -1951,6 +1951,42 @@ async function resolveUserNodesData(
   };
 }
 
+export async function lookupSessionUserId(
+  client: PgQueryExecutor,
+  rawToken: string,
+  now: Date = new Date(),
+): Promise<string | null> {
+  const trimmed = rawToken.trim();
+  if (!trimmed) return null;
+  const rows = await safeQuery<{ user_uuid: unknown; expires_at: unknown }>(
+    client,
+    `SELECT user_uuid::text AS user_uuid, expires_at
+     FROM sessions
+     WHERE token = $1
+     LIMIT 1`,
+    [trimmed],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  const expiresAt = parseDateOrNull(row.expires_at);
+  if (!expiresAt || expiresAt.getTime() <= now.getTime()) return null;
+  const userUuid = String(row.user_uuid ?? "").trim();
+  if (!userUuid) return null;
+  const user = await getUserById(client, userUuid);
+  if (!user) return null;
+  if (!user.active || user.archivedAt) {
+    throw new OverlayError(403, "account_suspended", "your account has been suspended");
+  }
+  return user.id;
+}
+
+export async function authenticateAgentServerUser(
+  c: Context<{ Bindings: WorkerEnv }>,
+  deps: AgentServerDeps,
+): Promise<string> {
+  return authenticateJWTAllowQuery(c, deps);
+}
+
 async function authenticateJWTAllowQuery(
   c: Context<{ Bindings: WorkerEnv }>,
   deps: AgentServerDeps,
@@ -1976,6 +2012,15 @@ async function authenticateJWTAllowQuery(
     }
     return userId;
   } catch (err) {
+    if (deps.withClient) {
+      const now = deps.now ? deps.now() : new Date();
+      const sessionUserId = await deps.withClient(c.env, (client) =>
+        lookupSessionUserId(client, token, now),
+      );
+      if (sessionUserId) {
+        return sessionUserId;
+      }
+    }
     if (err instanceof OverlayError) throw err;
     throw new OverlayError(401, "unauthorized", "invalid or expired token");
   }
@@ -2020,7 +2065,15 @@ export async function handleGetAgentStatus(
           jwtUserId = uid;
         }
       } catch {
-        return c.json({ error: "invalid_token" }, 401);
+        try {
+          const now = deps.now ? deps.now() : new Date();
+          jwtUserId = await withClient(c.env, (client) => lookupSessionUserId(client, token, now));
+        } catch (sessErr) {
+          if (sessErr instanceof OverlayError && sessErr.status === 403) {
+            return c.json({ error: "account_suspended" }, 403);
+          }
+          return c.json({ error: "invalid_token" }, 401);
+        }
       }
       if (!jwtUserId) {
         return c.json({ error: "invalid_token" }, 401);
